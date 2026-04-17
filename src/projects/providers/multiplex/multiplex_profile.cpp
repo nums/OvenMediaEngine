@@ -242,7 +242,18 @@ namespace pvd
 				auto audio_index_object = track_object["audioIndex"];
 				if (!audio_index_object.isNull())
 				{
+					if (!audio_index_object.isInt())
+					{
+						_last_error = "Invalid sourceStreams/trackMap/audioIndex: must be an integer";
+						return false;
+					}
+
 					audio_index = audio_index_object.asInt();
+					if (audio_index < -1)
+					{
+						_last_error = "Invalid sourceStreams/trackMap/audioIndex: must be -1 or greater";
+						return false;
+					}
 				}
 
 				ov::String source_track_name = source_track_name_object.asString().c_str();
