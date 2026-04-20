@@ -258,6 +258,25 @@ namespace pvd
 
 				ov::String source_track_name = source_track_name_object.asString().c_str();
 				ov::String new_track_name = new_track_name_object.asString().c_str();
+
+				// Warn if adding a second catch-all for the same source track name
+				if (audio_index == -1)
+				{
+					const auto &existing = source_stream->GetTrackMap();
+					auto eit = existing.find(source_track_name);
+					if (eit != existing.end())
+					{
+						for (const auto &e : eit->second)
+						{
+							if (e.audio_index == -1)
+							{
+								logtw("Multiplex: duplicate catch-all <Track> for sourceTrackName '%s' (no audioIndex). Use audioIndex to distinguish occurrences.", source_track_name.CStr());
+								break;
+							}
+						}
+					}
+				}
+
 				source_stream->AddTrackMap(source_track_name, NewTrackInfo(source_track_name, new_track_name, bitrate_conf, framerate_conf, public_name, language, characteristics, audio_index));
 				_new_track_names.emplace(new_track_name, true);
 			}
@@ -665,10 +684,34 @@ namespace pvd
 				if (audio_index_node)
 				{
 					audio_index = audio_index_node.text().as_int();
+					if (audio_index < -1)
+					{
+						_last_error = "Invalid sourceStreams/trackMap/AudioIndex: must be -1 or greater";
+						return false;
+					}
 				}
 
 				ov::String source_track_name = source_track_name_node.text().as_string();
 				ov::String new_track_name = new_track_name_node.text().as_string();
+
+				// Warn if adding a second catch-all for the same source track name
+				if (audio_index == -1)
+				{
+					const auto &existing = source_stream->GetTrackMap();
+					auto eit = existing.find(source_track_name);
+					if (eit != existing.end())
+					{
+						for (const auto &e : eit->second)
+						{
+							if (e.audio_index == -1)
+							{
+								logtw("Multiplex: duplicate catch-all <Track> for SourceTrackName '%s' (no <AudioIndex>). Use <AudioIndex> to distinguish occurrences.", source_track_name.CStr());
+								break;
+							}
+						}
+					}
+				}
+
 				source_stream->AddTrackMap(source_track_name, NewTrackInfo(source_track_name, new_track_name, bitrate_conf, framerate_conf, public_name, language, characteristics, audio_index));
 				_new_track_names.emplace(new_track_name, true);
 			}

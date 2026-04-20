@@ -197,8 +197,10 @@ namespace pvd
             }
 
             // Returns the NewTrackInfo for the Nth occurrence of source_track_name.
-            // If a single entry exists with audio_index == -1 it matches any occurrence.
-            // Otherwise the entry whose audio_index equals occurrence is returned.
+            // audio_index == -1 is the only catch-all value; any other negative value is invalid.
+            // Lookup order:
+            //   1. Explicit match: entry whose audio_index == occurrence.
+            //   2. Catch-all fallback: first entry with audio_index == -1 (if no explicit match).
             bool GetNewTrackInfo(const ov::String &source_track_name, int occurrence, NewTrackInfo &new_track_info) const
             {
                 auto it = _new_track_infos_map.find(source_track_name);
@@ -209,17 +211,20 @@ namespace pvd
 
                 const auto &infos = it->second;
 
-                // Single entry without explicit index → applies to all occurrences
-                if (infos.size() == 1 && infos[0].audio_index < 0)
-                {
-                    new_track_info = infos[0];
-                    return true;
-                }
-
-                // Find the entry whose audio_index matches this occurrence
+                // First pass: look for an explicit index match
                 for (const auto &info : infos)
                 {
                     if (info.audio_index == occurrence)
+                    {
+                        new_track_info = info;
+                        return true;
+                    }
+                }
+
+                // Second pass: fallback to catch-all (audio_index == -1)
+                for (const auto &info : infos)
+                {
+                    if (info.audio_index == -1)
                     {
                         new_track_info = info;
                         return true;
