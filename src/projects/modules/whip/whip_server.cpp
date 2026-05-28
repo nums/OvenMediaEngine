@@ -22,7 +22,8 @@ bool WhipServer::PrepareForTCPRelay()
 {
 	// For internal TURN/TCP relay configuration
 	const auto &ice_candidates_config = _webrtc_bind_cfg.GetIceCandidates();
-	_tcp_force = ice_candidates_config.IsTcpForce();
+	_tcp_force = ice_candidates_config.IsTcpRelayForce();
+	_default_transport = ice_candidates_config.GetDefaultTransport().UpperCaseString();
 
 	bool is_tcp_relay_configured = false;
 	const auto &tcp_relay_list = ice_candidates_config.GetTcpRelayList(&is_tcp_relay_configured);
@@ -74,8 +75,9 @@ bool WhipServer::PrepareForTCPRelay()
 				}
 				else
 				{
-					// Case 4 - Could not obtain an IP from the STUN server
-					logtw(OV_ICE_PORT_PUBLIC_IP " is specified on TCP relay, but failed to obtain public IP: %s", tcp_relay.CStr());
+					// Case 4 - Could not obtain an IP from the STUN server, fall back to all local IPv4 addresses
+					logtw(OV_ICE_PORT_PUBLIC_IP " is specified on TCP relay, but failed to obtain public IP. Falling back to all local IPv4 addresses: %s", tcp_relay.CStr());
+					ip_list = TurnIP::FromIPList(ov::SocketFamily::Inet, address_utilities->GetIPv4List());
 				}
 			}
 			else
@@ -201,6 +203,26 @@ bool WhipServer::Start(
 			_http_server_list = std::move(http_server_list);
 			_https_server_list = std::move(https_server_list);
 
+			// Replay any certificates that were inserted before `Start()` built the HTTPS
+			// server list (e.g., during the WebRTC provider's `OnCreateHost()` pass that
+			// runs after `RegisterModule()` but before `Bind()`).
+			// Without this replay those inserts would never reach a live server
+			// and `HttpsServer::OnConnected()` would refuse TLS handshakes with "there is no certificate".
+			// Best-effort: log and continue so one bad cert does not abort the whole module start.
+			for (const auto &[cert_name, cert] : _certificate_map)
+			{
+				for (auto &https_server : _https_server_list)
+				{
+					auto error = https_server->InsertCertificate(cert);
+
+					if (error != nullptr)
+					{
+						logte("Could not apply cached certificate '%s' to %p: %s",
+							  cert_name.CStr(), https_server.get(), error->What());
+					}
+				}
+			}
+
 			return true;
 		}
 
@@ -222,20 +244,27 @@ bool WhipServer::Stop()
 
 bool WhipServer::InsertCertificate(const std::shared_ptr<const info::Certificate> &certificate)
 {
-	if (certificate != nullptr)
+	if (certificate == nullptr)
 	{
-		_http_server_list_mutex.lock();
-		auto https_server_list = _https_server_list;
-		_http_server_list_mutex.unlock();
+		return true;
+	}
 
-		for (auto &https_server : https_server_list)
+	// Cache update and live-server update share a single lock
+	// so the cache is always a superset of what live servers have applied.
+	// The cache replays in `Start()` if this is called before listeners exist.
+	//
+	// Lock order: this mutex (outer) -> `HttpsServer::_https_certificate_map_mutex` (inner).
+	std::lock_guard lock_guard{_http_server_list_mutex};
+
+	_certificate_map[certificate->GetName()] = certificate;
+
+	for (auto &https_server : _https_server_list)
+	{
+		auto error = https_server->InsertCertificate(certificate);
+		if (error != nullptr)
 		{
-			auto error = https_server->InsertCertificate(certificate);
-			if (error != nullptr)
-			{
-				logte("Could not append certificate to %p: %s", https_server.get(), error->What());
-				return false;
-			}
+			logte("Could not append certificate to %p: %s", https_server.get(), error->What());
+			return false;
 		}
 	}
 
@@ -244,11 +273,16 @@ bool WhipServer::InsertCertificate(const std::shared_ptr<const info::Certificate
 
 bool WhipServer::RemoveCertificate(const std::shared_ptr<const info::Certificate> &certificate)
 {
-	_http_server_list_mutex.lock();
-	auto https_server_list = _https_server_list;
-	_http_server_list_mutex.unlock();
+	if (certificate == nullptr)
+	{
+		return true;
+	}
 
-	for (auto &https_server : https_server_list)
+	std::lock_guard lock_guard{_http_server_list_mutex};
+
+	_certificate_map.erase(certificate->GetName());
+
+	for (auto &https_server : _https_server_list)
 	{
 		auto error = https_server->RemoveCertificate(certificate);
 		if (error != nullptr)
@@ -381,11 +415,17 @@ std::shared_ptr<WhipInterceptor> WhipServer::CreateInterceptor()
 			response->SetHeader("ETag", answer._entity_tag);
 			response->SetHeader("Location", ov::String::FormatString("/%s/%s/%s?direction=whip", requested_url->App().CStr(), requested_url->Stream().CStr(), answer._session_id.CStr()));
 
-			// IF TcpForce == true or ?transport=tcp
-			if (_tcp_force == true || requested_url->GetQueryValue("transport").UpperCaseString() == "TCP")
+			// Add ICE Server Link headers if TcpRelay is configured.
+			// Send when transport is relay/all, or TcpRelayForce=true, matching the iceServers policy.
+			auto transport_param = requested_url->GetQueryValue("transport").UpperCaseString();
+			if (transport_param.IsEmpty())
 			{
-				// Add ICE Server Link
-
+				transport_param = _default_transport;
+			}
+			bool send_relay_link = _link_headers.empty() == false &&
+								   (_tcp_force || transport_param == "RELAY" || transport_param == "ALL");
+			if (send_relay_link)
+			{
 				// Add ICE Server Link from configuration
 				for (const auto &ice_server : _link_headers)
 				{

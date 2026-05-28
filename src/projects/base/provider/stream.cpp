@@ -65,7 +65,20 @@ namespace pvd
 		logti("%s/%s(%u) has been stopped playing stream", GetApplicationName(), GetName().CStr(), GetId());
 		ResetSourceStreamTimestamp();
 
-		_state = State::STOPPED;
+		// Preserve `TERMINATED`:
+		// demoting to `STOPPED` would let the reconnect loop revive a stream
+		// that was explicitly terminated (e.g. via API `DELETE`).
+		// Other callers reach here in non-terminal states (`PLAYING`/`ERROR`) and still transition to `STOPPED`.
+		// Compare-exchange loop closes the TOCTOU window where `Terminate()` lands between a plain
+		// load and the assignment: if another thread flips `_state` to `TERMINATED` mid-loop,
+		// `compare_exchange_weak` fails, the loop re-reads, sees `TERMINATED`, and exits without
+		// demoting.
+		auto current = _state.load();
+
+		while ((current != State::TERMINATED) &&
+			   (_state.compare_exchange_weak(current, State::STOPPED) == false))
+		{
+		}
 
 		return true;
 	}
@@ -84,11 +97,11 @@ namespace pvd
 		auto last_pkt_received_time_us = _last_pkt_received_time_us.load();
 		if (last_pkt_received_time_us >= 0)
 		{
-			auto current_time_us = std::chrono::duration_cast<std::chrono::microseconds>(
-				std::chrono::system_clock::now().time_since_epoch()).count();
-			auto reconnection_time_us = current_time_us - last_pkt_received_time_us;
+			int64_t current_time_us = std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count();
+			int64_t reconnection_time_us = current_time_us - last_pkt_received_time_us;
 
-			logti("Time taken to reconnect is %" PRId64 " milliseconds. add to the basetime", reconnection_time_us/1000);
+			logti("Time taken to reconnect is %" PRId64 " milliseconds. add to the basetime", reconnection_time_us / 1000);
 
 			_base_timestamp_us += reconnection_time_us;
 		}
@@ -345,7 +358,7 @@ namespace pvd
 		MonitorInstance->IncreaseBytesIn(*GetSharedPtrAs<info::Stream>(), packet->GetDataLength());
 
 		_last_pkt_received_time_us = std::chrono::duration_cast<std::chrono::microseconds>(
-			std::chrono::system_clock::now().time_since_epoch()).count();
+			std::chrono::steady_clock::now().time_since_epoch()).count();
 
 		auto master_clock_track = GetMediaTrackByOrder(cmn::MediaType::Video, 0);
 		if (master_clock_track == nullptr)

@@ -160,6 +160,9 @@ macro(ome_find_pkg var pkg version_var)
         set(_FP_HWACCEL_ARGS)
         if(OME_HWACCEL_NVIDIA)
             list(APPEND _FP_HWACCEL_ARGS -DOME_HWACCEL_NVIDIA=ON)
+            if(CMAKE_CUDA_HOST_COMPILER)
+                list(APPEND _FP_HWACCEL_ARGS "-DCMAKE_CUDA_HOST_COMPILER=${CMAKE_CUDA_HOST_COMPILER}")
+            endif()
         endif()
         if(OME_HWACCEL_QSV)
             list(APPEND _FP_HWACCEL_ARGS -DOME_HWACCEL_QSV=ON)
@@ -181,6 +184,9 @@ macro(ome_find_pkg var pkg version_var)
         else()
             list(APPEND _FP_HWACCEL_ARGS -DOME_ENABLE_X264=OFF)
         endif()
+        if(OME_WHISPER_STATIC)
+            list(APPEND _FP_HWACCEL_ARGS -DOME_WHISPER_STATIC=ON)
+        endif()        
         if(OME_SKIP_DEPENDENCY_CHECK)
             # Auto-install suppressed - report only
         elseif(_FP_REINSTALL_TARGET)
@@ -299,6 +305,37 @@ macro(ome_find_pkg var pkg version_var)
 endmacro()
 
 # ==============================================================================
+# NVIDIA toolchain validation (fail-fast)
+#
+# Must run BEFORE any ome_find_pkg() call below — those calls can trigger an
+# automatic reinstall of CUDA-dependent libraries (notably whisper.cpp), and a
+# missing CUDA Toolkit would then surface as an opaque nvcc error deep inside
+# the whisper build instead of a clear up-front message.
+# ==============================================================================
+if(OME_HWACCEL_NVIDIA)
+    set(CUDA_ROOT "/usr/local/cuda")
+    find_program(NV_NVCC           nvcc            HINTS ${CUDA_ROOT}/bin /usr/cuda/bin)
+    # libnvidia-ml.so and libcuda.so are not included in Docker images like
+    # `nvidia/cuda` base images, so also check the stubs directory.
+    find_library(NV_ML_LIB         nvidia-ml       HINTS ${CUDA_ROOT}/lib64 ${CUDA_ROOT}/lib64/stubs /usr/cuda/lib64 /usr/cuda/lib64/stubs /usr/lib/x86_64-linux-gnu)
+    find_library(NV_CUDA_LIB       cuda            HINTS ${CUDA_ROOT}/lib64 ${CUDA_ROOT}/lib64/stubs /usr/cuda/lib64 /usr/cuda/lib64/stubs /usr/lib/x86_64-linux-gnu)
+    find_library(NV_CUDART_LIB     cudart_static   HINTS ${CUDA_ROOT}/lib64 /usr/cuda/lib64 /usr/lib/x86_64-linux-gnu)
+
+    if(NOT (NV_NVCC AND NV_CUDA_LIB AND NV_CUDART_LIB AND NV_ML_LIB))
+        message(FATAL_ERROR
+            "[OME] OME_HWACCEL_NVIDIA=ON but CUDA Toolkit is missing or incomplete:\n"
+            "  nvcc:             ${NV_NVCC}\n"
+            "  libnvidia-ml:     ${NV_ML_LIB}\n"
+            "  libcuda:          ${NV_CUDA_LIB}\n"
+            "  libcudart_static: ${NV_CUDART_LIB}\n"
+            "Install CUDA Toolkit: https://developer.nvidia.com/cuda-downloads\n"
+            "Or disable NVIDIA support: rm -rf build && cmake -B build -DOME_HWACCEL_NVIDIA=OFF ..."
+        )
+    endif()
+
+endif()
+
+# ==============================================================================
 # Required dependencies  (exact version required; wrong/newer version → targeted reinstall)
 # ==============================================================================
 ome_find_pkg(PKG_OPENSSL        openssl         OME_VER_OPENSSL         REINSTALL_TARGET openssl)
@@ -328,37 +365,70 @@ ome_find_pkg(PKG_LIBAVUTIL      libavutil       OME_VER_LIBAVUTIL       REINSTAL
 # Optional / hardware-accelerated dependencies
 # ==============================================================================
 
-# NVIDIA NVENC/NVDEC
+# NVIDIA CUDA/NVML — toolchain already validated up top
 if(OME_HWACCEL_NVIDIA)
-    pkg_check_modules(PKG_FFNVCODEC QUIET IMPORTED_TARGET ffnvcodec)
-    if(NOT PKG_FFNVCODEC_FOUND)
-        # Auto-install nv-codec-headers with NVIDIA flag forwarded
-        message(STATUS "[OME] ffnvcodec not found - installing nv-codec-headers ...")
-        execute_process(
-            COMMAND ${CMAKE_COMMAND}
-                -DOME_DEP_PREFIX=${OME_DEP_PREFIX}
-                -DOME_HWACCEL_NVIDIA=ON
-                -DTARGET=nvcc_hdr
-                -P "${CMAKE_SOURCE_DIR}/cmake/InstallPrerequisites.cmake"
-            RESULT_VARIABLE _ret
-        )
-        if(_ret EQUAL 0)
-            pkg_check_modules(PKG_FFNVCODEC IMPORTED_TARGET ffnvcodec)
-        endif()
-    endif()
-    if(PKG_FFNVCODEC_FOUND)
-        message(STATUS "[OME] NVIDIA hardware acceleration: ENABLED")
-        add_compile_definitions(HWACCELS_NVIDIA_ENABLED)
-        include_directories(/usr/local/cuda/include)
-        link_directories(/usr/local/cuda/lib64 /usr/local/cuda/lib64/stubs)
-        set(OME_NVIDIA_LIBS cuda cudart nvidia-ml)
-    else()
-        message(WARNING "[OME] OME_HWACCEL_NVIDIA=ON but ffnvcodec still not found - disabling")
-        set(OME_HWACCEL_NVIDIA OFF)
-    endif()
+    ome_find_pkg(PKG_FFNVCODEC  ffnvcodec       OME_VER_NVCC_HDR        REINSTALL_TARGET ffnvcodec)
+
+    message(STATUS "[OME] NVIDIA hardware acceleration: ENABLED")
+    add_compile_definitions(HWACCELS_NVIDIA_ENABLED)
+    include_directories(${CUDA_ROOT}/include)
+    link_directories(${CUDA_ROOT}/lib64)
+
+    # Use absolute paths from find_library. Some systems install only the
+    # runtime SONAME (libnvidia-ml.so.1) without the linker symlink
+    # (libnvidia-ml.so), so -lnvidia-ml cannot be resolved through
+    # link_directories. The full path side-steps that.
+    set(OME_NVIDIA_LIBS ${NV_CUDA_LIB} ${NV_ML_LIB} ${NV_CUDART_LIB} rt dl)
+
+    unset(NV_CUDA_LIB CACHE)
+    unset(NV_CUDART_LIB CACHE)
+    unset(NV_ML_LIB CACHE)
+    unset(NV_NVCC CACHE)
+    unset(CUDA_ROOT)
 endif()
 
-# Intel QSV
+# Whisper GGML
+if(PKG_WHISPER_FOUND)
+    find_library(GGML_CPU_LIB   ggml-cpu        HINTS ${OME_DEP_PREFIX}/lib ${OME_DEP_PREFIX}/lib64)
+    set_property(TARGET PkgConfig::PKG_WHISPER APPEND PROPERTY INTERFACE_LINK_LIBRARIES "${GGML_CPU_LIB}")
+    set_property(TARGET PkgConfig::PKG_WHISPER APPEND PROPERTY INTERFACE_LINK_LIBRARIES gomp)
+    
+    if(OME_HWACCEL_NVIDIA)  
+        set(CUDA_ROOT "/usr/local/cuda")
+
+        find_library(NV_GGML_CUDA_LIB  ggml-cuda       HINTS ${OME_DEP_PREFIX}/lib ${OME_DEP_PREFIX}/lib64) 
+        find_library(NV_CULIBOS_LIB    culibos         HINTS ${CUDA_ROOT}/lib64 /usr/lib/x86_64-linux-gnu)                
+        
+        if(OME_WHISPER_STATIC)
+            # Static CUDA Library
+            find_library(NV_CUBLAS_LIB     cublas_static   HINTS ${CUDA_ROOT}/lib64 /usr/lib/x86_64-linux-gnu)
+            find_library(NV_CUBLASLT_LIB   cublasLt_static HINTS ${CUDA_ROOT}/lib64 /usr/lib/x86_64-linux-gnu)
+            message (STATUS "[OME] Building with static CUDA libraries")            
+        else()
+            # Shared CUDA Library
+            find_library(NV_CUBLAS_LIB     cublas          HINTS ${CUDA_ROOT}/lib64 /usr/lib/x86_64-linux-gnu)
+            find_library(NV_CUBLASLT_LIB   cublasLt        HINTS ${CUDA_ROOT}/lib64 /usr/lib/x86_64-linux-gnu)
+            message (STATUS "[OME] Building with shared CUDA libraries")
+        endif()
+
+        if(NV_GGML_CUDA_LIB AND NV_CUBLAS_LIB AND NV_CUBLASLT_LIB)
+            set_property(TARGET PkgConfig::PKG_WHISPER APPEND PROPERTY INTERFACE_LINK_LIBRARIES "${NV_GGML_CUDA_LIB}")
+            set_property(TARGET PkgConfig::PKG_WHISPER APPEND PROPERTY INTERFACE_LINK_LIBRARIES "${NV_CUBLAS_LIB}")
+            set_property(TARGET PkgConfig::PKG_WHISPER APPEND PROPERTY INTERFACE_LINK_LIBRARIES "${NV_CUBLASLT_LIB}")
+            set_property(TARGET PkgConfig::PKG_WHISPER APPEND PROPERTY INTERFACE_LINK_LIBRARIES "${NV_CULIBOS_LIB}")
+        else()
+            message(WARNING "[OME] OME_HWACCEL_NVIDIA=ON but GGML-CUDA not found")
+        endif()      
+    endif()  
+    
+    unset(GGML_CPU_LIB CACHE)    
+    unset(NV_CUBLAS_LIB CACHE)
+    unset(NV_CUBLASLT_LIB CACHE)
+    unset(NV_GGML_CUDA_LIB CACHE)  
+    unset(CUDA_ROOT)      
+endif()
+
+# Intel QSV (Deprecated)
 if(OME_HWACCEL_QSV)
     pkg_check_modules(PKG_LIBMFX IMPORTED_TARGET libmfx)
     if(PKG_LIBMFX_FOUND)
@@ -375,7 +445,7 @@ if(OME_HWACCEL_XMA)
     ome_find_pkg(PKG_LIBXMA2API libxma2api OPTIONAL)
     ome_find_pkg(PKG_XVBM       xvbm       OPTIONAL)
     ome_find_pkg(PKG_LIBXRM     libxrm     OPTIONAL)
-    if(PKG_LIBXMA2API_FOUND AND PKG_LIBXRM_FOUND)
+    if(PKG_LIBXMA2API_FOUND AND PKG_LIBXRM_FOUND AND PKG_XVBM_FOUND)
         message(STATUS "[OME] Xilinx XMA hardware acceleration: ENABLED")
         add_compile_definitions(HWACCELS_XMA_ENABLED)
     else()
@@ -396,14 +466,37 @@ if(OME_HWACCEL_NILOGAN)
     endif()
 endif()
 
-# jemalloc - required for Release builds, optional for Debug (can be forced with OME_ENABLE_JEMALLOC=ON)
+# Stubs 
+# - Stubs lack pkg-config entries, so check for the stubs directory and install if missing.
+if(OME_HWACCEL_NVIDIA OR OME_HWACCEL_XMA OR OME_HWACCEL_NILOGAN)
+    if(NOT IS_DIRECTORY "${OME_DEP_PREFIX}/lib/stubs")
+        message(STATUS "[OME] ${OME_DEP_PREFIX}/lib/stubs not found - installing stubs libraries ...")
+        execute_process(
+            COMMAND ${CMAKE_COMMAND}
+                -DOME_DEP_PREFIX=${OME_DEP_PREFIX}
+                -DTARGET=stubs
+                -P "${CMAKE_SOURCE_DIR}/cmake/InstallPrerequisites.cmake"
+            RESULT_VARIABLE _stubs_ret
+        )
+        if(NOT _stubs_ret EQUAL 0)
+            message(FATAL_ERROR "[OME] Failed to install stubs.")
+        endif()
+        unset(_stubs_ret)
+    endif()
+endif()
+
+
+# jemalloc - default ON in Release / OFF in Debug (see OME_ENABLE_JEMALLOC in CMakeLists.txt).
 # Note: when built with --enable-prof, jemalloc reports its pkg-config version as "<ver>_0"
 # (e.g. "5.3.0_0"), so we use >= instead of = to avoid a false version mismatch.
-if(OME_ENABLE_JEMALLOC OR (CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT DEFINED OME_ENABLE_JEMALLOC))
+if(OME_ENABLE_JEMALLOC)
     ome_find_pkg(PKG_JEMALLOC jemalloc OME_VER_JEMALLOC
         VERSION_OP >=
         REINSTALL_TARGET jemalloc
-        EXTRA_ARGS -DENABLE_JEMALLOC_PROF=${OME_USE_JEMALLOC_PROFILE}
+        EXTRA_ARGS
+            -DENABLE_JEMALLOC_PROF=${OME_USE_JEMALLOC_PROFILE}
+            -DOME_ENABLE_JEMALLOC_LG_PAGE_MAX=${OME_ENABLE_JEMALLOC_LG_PAGE_MAX}
+            -DOME_TARGET_PROCESSOR=${CMAKE_SYSTEM_PROCESSOR}
     )
     if(PKG_JEMALLOC_FOUND)
         message(STATUS "[OME] jemalloc: ENABLED")
@@ -443,6 +536,7 @@ if(OME_ENABLE_X264)
 else()
     message(STATUS "[OME] libx264: disabled by OME_ENABLE_X264=OFF")
 endif()
+
 
 # uuid (system library, not pkg-config)
 find_library(UUID_LIB uuid REQUIRED)

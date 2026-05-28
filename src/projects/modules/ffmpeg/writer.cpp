@@ -59,7 +59,7 @@ namespace ffmpeg
 			return 1;
 		}
 
-		auto ellapse = std::chrono::high_resolution_clock::now() - writer->GetLastPacketSentTime();
+		auto elapsed = std::chrono::steady_clock::now() - writer->GetLastPacketSentTime();
 		if(writer->GetState() == WriterStateClosed)
 		{
 			logte("Writer is closed. stop the writer.");
@@ -67,19 +67,19 @@ namespace ffmpeg
 		}
 		else if(writer->GetState() == WriterStateConnecting)
 		{
-			auto ellapse_ms = std::chrono::duration_cast<std::chrono::milliseconds>(ellapse).count();
-			if(ellapse_ms > writer->GetConnectionTimeout())
+			int64_t elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+			if(elapsed_ms > writer->GetConnectionTimeout())
 			{
-				logte("connection timeout occurred. stop the writer. %" PRId64 " milliseconds. ", ellapse_ms);
+				logte("connection timeout occurred. stop the writer. %" PRId64 " milliseconds. ", elapsed_ms);
 				return 1;
 			}
 		}
 		else if(writer->GetState() == WriterStateConnected)
 		{
-			auto ellapse_ms = std::chrono::duration_cast<std::chrono::milliseconds>(ellapse).count();
-			if(ellapse_ms > writer->GetSendTimeout())
+			int64_t elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+			if(elapsed_ms > writer->GetSendTimeout())
 			{
-				logte("Send timeout occurred. stop the writer. %" PRId64 " milliseconds. ", ellapse_ms);
+				logte("Send timeout occurred. stop the writer. %" PRId64 " milliseconds. ", elapsed_ms);
 				return 1;
 			}
 		}
@@ -332,7 +332,7 @@ namespace ffmpeg
 
 		if (!(av_format->oformat->flags & AVFMT_NOFILE))
 		{
-			_last_packet_sent_time = std::chrono::high_resolution_clock::now();
+			_last_packet_sent_time = std::chrono::steady_clock::now();
 			int error = avio_open2(&av_format->pb, av_format->url, AVIO_FLAG_WRITE, &_interrupt_cb, nullptr);
 			if (error < 0)
 			{
@@ -347,7 +347,7 @@ namespace ffmpeg
 		_need_to_close = true;
 
 		// Write header
-		_last_packet_sent_time = std::chrono::high_resolution_clock::now();
+		_last_packet_sent_time = std::chrono::steady_clock::now();
 
 		// Disable edts box
 		AVDictionary *format_options = nullptr;
@@ -589,7 +589,7 @@ namespace ffmpeg
 			return false;
 		}
 
-		_last_packet_sent_time = std::chrono::high_resolution_clock::now();
+		_last_packet_sent_time = std::chrono::steady_clock::now();
 
 		std::unique_lock<std::shared_mutex> mlock(_av_format_lock);
 
@@ -633,7 +633,7 @@ namespace ffmpeg
 		return true;
 	}
 
-	std::chrono::high_resolution_clock::time_point Writer::GetLastPacketSentTime()
+	std::chrono::steady_clock::time_point Writer::GetLastPacketSentTime()
 	{
 		return _last_packet_sent_time;
 	}

@@ -421,6 +421,9 @@ namespace ov
 				{
 					// Succeeded
 					_local_address = std::make_shared<SocketAddress>(address);
+					_local_address->SetTransport(GetType() == SocketType::Tcp
+						? SocketAddress::Transport::Tcp
+						: SocketAddress::Transport::Udp);
 				}
 				else
 				{
@@ -442,6 +445,7 @@ namespace ov
 				{
 					// Succeeded
 					_local_address = std::make_shared<SocketAddress>(address);
+					_local_address->SetTransport(SocketAddress::Transport::Srt);
 				}
 				else
 				{
@@ -1672,6 +1676,15 @@ namespace ov
 				socket_error	 = SocketError::CreateError("Remote is disconnected");
 				*received_length = 0UL;
 
+				// NOTE: `SRT_ECONNLOST` is ambiguous - close as plain Disconnected.
+				//
+				// libsrt reports `SRT_ECONNLOST` for BOTH a real network break
+				// AND a graceful peer `srt_close()` - when the peer sends
+				// `UMSG_SHUTDOWN`, libsrt's `processCtrlShutdown()` sets the
+				// broken flag and calls `completeBrokenConnectionDependencies(SRT_ECONNLOST)`,
+				// so the receiver cannot tell the two cases apart at the API level.
+				// Close with `Disconnected` (same posture as TCP RST) instead of `Error`
+				// so downstream does not treat this as an unambiguous transport failure.
 				CloseWithState(SocketState::Disconnected);
 
 				return socket_error;
@@ -1877,8 +1890,15 @@ namespace ov
 					{
 						const auto port = GetLocalAddress()->Port();
 
-						address_pair->SetLocalAddress(QueryLocalAddress(_family, port, remote, &msg));
-						address_pair->SetRemoteAddress(SocketAddress("", remote));
+						const auto transport = _local_address->GetTransport();
+
+						auto local = QueryLocalAddress(_family, port, remote, &msg);
+						local.SetTransport(transport);
+						address_pair->SetLocalAddress(local);
+
+						SocketAddress remote_addr("", remote);
+						remote_addr.SetTransport(transport);
+						address_pair->SetRemoteAddress(remote_addr);
 					}
 
 					UpdateLastRecvTime();
@@ -1910,24 +1930,24 @@ namespace ov
 		return socket_error;
 	}
 
-	std::chrono::system_clock::time_point Socket::GetLastRecvTime() const
+	std::chrono::steady_clock::time_point Socket::GetLastRecvTime() const
 	{
 		return _last_recv_time;
 	}
 
-	std::chrono::system_clock::time_point Socket::GetLastSentTime() const
+	std::chrono::steady_clock::time_point Socket::GetLastSentTime() const
 	{
 		return _last_sent_time;
 	}
 
 	void Socket::UpdateLastRecvTime()
 	{
-		_last_recv_time = std::chrono::high_resolution_clock::now();
+		_last_recv_time = std::chrono::steady_clock::now();
 	}
 
 	void Socket::UpdateLastSentTime()
 	{
-		_last_sent_time = std::chrono::high_resolution_clock::now();
+		_last_sent_time = std::chrono::steady_clock::now();
 	}
 
 	bool Socket::Flush()

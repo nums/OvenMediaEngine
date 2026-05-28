@@ -33,6 +33,7 @@ public:
 
 	// Inout Stream Type
 	void SetType(cmn::MediaRouterStreamType type);
+	void SetBufferRetentionDuration(int delay_ms);
 	bool IsInbound() { return _type == cmn::MediaRouterStreamType::INBOUND; }
 	bool IsOutbound() { return _type == cmn::MediaRouterStreamType::OUTBOUND; }
 
@@ -46,19 +47,19 @@ public:
 		MirrorBufferItem(std::shared_ptr<MediaPacket> &packet)
 			: packet(packet)
 		{
-			created_time = std::chrono::system_clock::now();
+			created_time = std::chrono::steady_clock::now();
 		}
 
 		// Elapsed milliseconds
 		int64_t GetElapsedMilliseconds()
 		{
-			auto now = std::chrono::system_clock::now();
+			auto now = std::chrono::steady_clock::now();
 			auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - created_time);
 			return elapsed.count();
 		}
 
 		// timepoint created
-		std::chrono::time_point<std::chrono::system_clock> created_time;
+		std::chrono::time_point<std::chrono::steady_clock> created_time;
 		std::shared_ptr<MediaPacket> packet;
 	};
 	std::vector<std::shared_ptr<MirrorBufferItem>> GetMirrorBuffer();

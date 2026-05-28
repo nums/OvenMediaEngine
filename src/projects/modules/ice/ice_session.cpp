@@ -23,22 +23,22 @@ IceSession::IceSession(session_id_t session_id, IceSession::Role role,
 
 ov::String IceSession::ToString() const
 {
-	auto connected_candidate_pair = GetConnectedCandidatePair();
+	auto active_candidate_pair = GetActiveCandidatePair();
 
-	return ov::String::FormatString("IceSession: session_id=%u, role=%s, state=%s, local_ufrag=%s, expire_after_ms=%d, lifetime_epoch_ms=%" PRIu64 ", ConnectedCandidatePair=%s",
+	return ov::String::FormatString("IceSession: session_id=%u, role=%s, state=%s, local_ufrag=%s, expire_after_ms=%d, lifetime_epoch_ms=%" PRIu64 ", ActivePair=%s",
 		_session_id, 
 		_role == Role::CONTROLLED ? "CONTROLLED" : "CONTROLLING",
 		IceConnectionStateToString(_state.load()),
 		GetLocalUfrag().CStr(),
 		_expire_after_ms,
 		_lifetime_epoch_ms, 
-		(connected_candidate_pair != nullptr) ? connected_candidate_pair->ToString().CStr() : "None");
+		(active_candidate_pair != nullptr) ? active_candidate_pair->ToString().CStr() : "None");
 }
 
 void IceSession::Refresh()
 {
 	std::scoped_lock lock(_expire_time_mutex);
-	_expire_time = std::chrono::system_clock::now() + std::chrono::milliseconds(_expire_after_ms);
+	_expire_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(_expire_after_ms);
 }
 
 bool IceSession::IsExpired() const
@@ -49,7 +49,7 @@ bool IceSession::IsExpired() const
 	}
 
 	std::shared_lock lock(_expire_time_mutex);
-	return (std::chrono::system_clock::now() > _expire_time);
+	return (std::chrono::steady_clock::now() > _expire_time);
 }
 
 void IceSession::SetState(IceConnectionState state)
@@ -97,66 +97,45 @@ std::any IceSession::GetUserData() const
 	return _user_data;
 }
 
-void IceSession::SetTurnClient(bool is_turn_client)
+void IceSession::SetCandidatePairTurnDataChannel(const ov::SocketAddressPair& address_pair, const std::shared_ptr<ov::Socket>& socket, uint16_t channel_number)
 {
-	_is_turn_client = is_turn_client;
+	auto candidate_pair = FindCandidatePair(address_pair);
+	if (candidate_pair == nullptr)
+	{
+		// TURN ChannelBind/ChannelData can arrive before the relayed STUN
+		// connectivity check that would otherwise create the pair.
+		candidate_pair = CreateAndAddCandidatePair(address_pair, socket);
+	}
+
+	candidate_pair->SetTurnDataChannel(channel_number);
 }
 
-bool IceSession::IsTurnClient() const
+void IceSession::SetCandidatePairTurnSendIndication(const ov::SocketAddressPair& address_pair, const std::shared_ptr<ov::Socket>& socket, const ov::SocketAddress& turn_peer_address)
 {
-	return _is_turn_client;
+	auto candidate_pair = FindCandidatePair(address_pair);
+	if (candidate_pair == nullptr)
+	{
+		candidate_pair = CreateAndAddCandidatePair(address_pair, socket);
+	}
+
+	candidate_pair->SetTurnSendIndication(turn_peer_address);
 }
 
-// Is data channel enabled
-void IceSession::SetDataChannelEnabled(bool is_data_channel_enabled)
+std::shared_ptr<IceCandidatePair> IceSession::GetActiveCandidatePair() const
 {
-	_is_data_channel_enabled = is_data_channel_enabled;	
+	std::shared_lock lock(_active_candidate_pair_mutex);
+	return _active_candidate_pair;
 }
 
-bool IceSession::IsDataChannelEnabled() const
+std::shared_ptr<ov::Socket> IceSession::GetActiveSocket() const
 {
-	return _is_data_channel_enabled;
-}
-
-// Data channel number
-void IceSession::SetDataChannelNumber(uint16_t data_channel_number)
-{
-	_data_channel_number = data_channel_number;
-}
-
-uint16_t IceSession::GetDataChannelNumber() const
-{
-	return _data_channel_number;
-}
-
-// TURN peer address
-void IceSession::SetTurnPeerAddress(const ov::SocketAddress& peer_address)
-{
-	std::scoped_lock lock(_turn_peer_address_mutex);
-	_turn_peer_address = peer_address;
-}
-
-ov::SocketAddress IceSession::GetTurnPeerAddress() const
-{
-	std::shared_lock lock(_turn_peer_address_mutex);
-	return _turn_peer_address;
-}
-
-std::shared_ptr<IceCandidatePair> IceSession::GetConnectedCandidatePair() const
-{
-	std::shared_lock lock(_connected_candidate_pair_mutex);
-	return _connected_candidate_pair;
-}
-
-std::shared_ptr<ov::Socket> IceSession::GetConnectedSocket() const
-{
-	auto connected_candidate_pair = GetConnectedCandidatePair();
-	if (connected_candidate_pair == nullptr)
+	auto active_candidate_pair = GetActiveCandidatePair();
+	if (active_candidate_pair == nullptr)
 	{
 		return nullptr;
 	}
 	
-	return connected_candidate_pair->GetSocket();
+	return active_candidate_pair->GetSocket();
 }
 
 std::shared_ptr<IceCandidatePair> IceSession::FindCandidatePair(const ov::SocketAddressPair& address_pair) const
@@ -170,6 +149,40 @@ std::shared_ptr<IceCandidatePair> IceSession::FindCandidatePair(const ov::Socket
 	}
 
 	return nullptr;
+}
+
+std::vector<std::shared_ptr<ov::Socket>> IceSession::GetCandidatePairSockets() const
+{
+	std::shared_lock lock(_candidate_pairs_mutex);
+
+	std::vector<std::shared_ptr<ov::Socket>> sockets;
+	for (const auto& [address_pair, candidate_pair] : _candidate_pairs)
+	{
+		auto socket = candidate_pair->GetSocket();
+		if (socket == nullptr)
+		{
+			continue;
+		}
+
+		// Distinct sockets only (the same socket can back multiple pairs,
+		// e.g. the shared UDP listener or one TCP connection).
+		bool already_added = false;
+		for (const auto& s : sockets)
+		{
+			if (s == socket)
+			{
+				already_added = true;
+				break;
+			}
+		}
+
+		if (already_added == false)
+		{
+			sockets.push_back(socket);
+		}
+	}
+
+	return sockets;
 }
 
 std::shared_ptr<IceCandidatePair> IceSession::CreateAndAddCandidatePair(const ov::SocketAddressPair& address_pair, const std::shared_ptr<ov::Socket>& socket)
@@ -269,42 +282,75 @@ bool IceSession::IsConnectable(const ov::SocketAddressPair& address_pair)
 	return candidate_pair->IsConnectable();
 }
 
-bool IceSession::IsConnected(const ov::SocketAddressPair& address_pair)
+bool IceSession::IsActive(const ov::SocketAddressPair& address_pair)
 {
-	auto connected_candidate_pair = GetConnectedCandidatePair();
-	if (connected_candidate_pair == nullptr)
+	auto active_candidate_pair = GetActiveCandidatePair();
+	if (active_candidate_pair == nullptr)
 	{
 		return false;
 	}
 
-	return connected_candidate_pair->GetAddressPair() == address_pair;
+	return active_candidate_pair->GetAddressPair() == address_pair;
 }
 
-// USE-CANDIDATE, used for controlling role
-bool IceSession::UseCandidate(const ov::SocketAddressPair& address_pair)
+// Mark a STUN-validated pair as nominated/eligible. Multiple pairs may be
+// nominated; the one we actually send on is chosen by SelectActiveCandidatePair()
+// when the peer sends application data on it. Returns true only when the pair
+// is newly nominated (idempotent: false if it was already nominated).
+bool IceSession::MarkNominated(const ov::SocketAddressPair& address_pair)
 {
-	std::scoped_lock lock(_connected_candidate_pair_mutex);
-
-	// TODO(Getroot) : Consider the case where the ICE restart occurs
-	if (GetState() != IceConnectionState::Checking)
-	{
-		logte("ICE session : %u | UseCandidate() | Invalid state: %s", GetSessionID(), IceConnectionStateToString(GetState()));
-		return false;
-	}
-
 	auto candidate_pair = FindCandidatePair(address_pair);
 	if (candidate_pair == nullptr)
 	{
-		logte("ICE session : %u | UseCandidate() | No candidate pair found for address pair: %s", GetSessionID(), address_pair.ToString().CStr());
+		logtw("ICE session : %u | MarkNominated() | No candidate pair for %s", GetSessionID(), address_pair.ToString().CStr());
 		return false;
 	}
 
-	// candidate state
-	candidate_pair->SetState(IceConnectionState::Connected);
-	_connected_candidate_pair = candidate_pair;
+	// Atomically nominate only a freshly validated (Checking) pair. The CAS
+	// makes this race-free against a concurrent MarkNominated() and against
+	// OnReceivedStunBindingErrorResponse() setting Failed: an already Connected
+	// pair is a no-op and a Failed pair is never resurrected. false means
+	// "nothing changed" (the caller runs the quick-connect burst once per pair).
+	return candidate_pair->CompareExchangeState(IceConnectionState::Checking, IceConnectionState::Connected);
+}
 
-	// Global state
+// Make a nominated pair the active pair (the one we send on). Called when the
+// peer sends application data on it, so OME follows the pair the peer chose
+// and switches if the peer moves.
+bool IceSession::SelectActiveCandidatePair(const ov::SocketAddressPair& address_pair)
+{
+	std::scoped_lock lock(_active_candidate_pair_mutex);
+
+	if (_active_candidate_pair != nullptr && _active_candidate_pair->GetAddressPair() == address_pair)
+	{
+		// Already the active pair
+		return true;
+	}
+
+	// Must be a STUN-validated pair (candidate pairs are created only after
+	// ufrag + MESSAGE-INTEGRITY pass) that has not failed its check.
+	auto candidate_pair = FindCandidatePair(address_pair);
+	if (candidate_pair == nullptr || candidate_pair->GetState() == IceConnectionState::Failed)
+	{
+		return false;
+	}
+
+	auto previous = _active_candidate_pair;
+
+	_active_candidate_pair = candidate_pair;
 	SetState(IceConnectionState::Connected);
+
+	// ToString() includes the socket (TCP/UDP + addresses), useful for tracing
+	// which path the peer moved to.
+	if (previous == nullptr)
+	{
+		logti("ICE session %u | active pair selected: %s", GetSessionID(), candidate_pair->ToString().CStr());
+	}
+	else
+	{
+		logti("ICE session %u | active pair switched: %s -> %s",
+			  GetSessionID(), previous->ToString().CStr(), candidate_pair->ToString().CStr());
+	}
 
 	return true;
 }

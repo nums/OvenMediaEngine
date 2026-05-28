@@ -9,6 +9,7 @@
 
 #include "webrtc_stream.h"
 
+#include "base/ovlibrary/converter.h"
 #include "base/ovlibrary/random.h"
 #include "modules/rtp_rtcp/rtcp_info/sender_report.h"
 #include "webrtc_application.h"
@@ -109,6 +110,18 @@ namespace pvd
 		_srtp_transport = std::make_shared<SrtpTransport>();
 		_dtls_transport = std::make_shared<DtlsTransport>();
 		_dtls_transport->SetLocalCertificate(_certificate);
+
+		// Bind the peer fingerprint advertised in the remote SDP so that the
+		// DTLS handshake refuses any peer whose certificate digest does not match.
+		ov::String peer_fingerprint_algorithm = _remote_sdp->GetFingerprintAlgorithm();
+		ov::String peer_fingerprint_value = _remote_sdp->GetFingerprintValue();
+		if (peer_fingerprint_algorithm.IsEmpty() || peer_fingerprint_value.IsEmpty())
+		{
+			logte("Remote SDP does not include a DTLS fingerprint; refusing to start DTLS");
+			return false;
+		}
+		_dtls_transport->SetPeerFingerprint(peer_fingerprint_algorithm, peer_fingerprint_value);
+
 		_dtls_transport->StartDTLS();
 
 		// RFC3264
@@ -268,6 +281,27 @@ namespace pvd
 		if (rid_attr != nullptr)
 		{
 			has_rid_extension = answer_media_desc->FindExtmapItem("urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id", rid_extension_id, rid_extension_uri);
+			
+			if (has_rid_extension)
+			{
+				// Key: "mid:rid" when the SDP a=mid identifier is available to disambiguate across m= sections
+				// that reuse the same RID values; otherwise just "rid".
+				// RID values are [a-zA-Z0-9\-_]+ and MID tokens contain no ':', so ':' is a safe separator.
+				//
+				// Examples:
+				//   MID="video0", RID="high" → key = "video0:high"
+				//   MID="video0", RID="low"  → key = "video0:low"
+				//   no MID,       RID="high" → key = "high"
+				auto mid = answer_media_desc->GetMid();
+				auto key = (mid.has_value() && !mid->IsEmpty())
+							? (mid.value() + ":" + rid_attr->GetId())
+							: rid_attr->GetId();
+				_simulcast_track_map[key] = track->GetId();
+
+				logti("[%s(%u)] Simulcast track mapped - key(%s), track_id(%u), mid_ext(%s), rid(%s)",
+					GetName().CStr(), GetId(), key.CStr(), track->GetId(),
+					has_mid_extension ? "yes" : "no", rid_attr->GetId().CStr());
+			}
 		}
 
 		// Add Rtp Receiver
@@ -358,17 +392,39 @@ namespace pvd
 	{
 		_oven_capabilities = capabilities;
 
-		// 26.01.08
-		// Oven-Capabilities: max_width=1920, max_height=1080, max_fps=30
+		// Oven-Capabilities header format:
+		//
+		// 1. Plain format (applied to the first video track only):
+		//    max_width=1920, max_height=1080, max_fps=30
+		//
+		//    capabilities = "max_width=1920, max_height=1080, max_fps=30"
+		//
+		// 2. RID format (applied per RID to the corresponding simulcast track):
+		//    rid:high:max_width=1280, rid:high:max_height=720, rid:high:max_fps=30, rid:low:max_width=640, rid:low:max_height=360
+		//
+		//    capabilities = "rid:high:max_width=1280, rid:high:max_height=720, rid:high:max_fps=30, rid:low:max_width=640, rid:low:max_height=360"
+		//
+		// 3. MID+RID format (disambiguates RIDs across multiple m= sections):
+		//    mid:<mid_id>:rid:<rid_id>:<field>=<value>
+		//
+		//    capabilities = "mid:0:rid:high:max_width=1280, mid:0:rid:high:max_height=720, mid:0:rid:high:max_fps=30, mid:0:rid:low:max_width=640, mid:0:rid:low:max_height=360"
+		//
+		//    Internally keyed by "mid:rid" in _simulcast_track_map (e.g. "0:high" → track_id),
+		//    so the same maps (rid_max_*) cover both RID-only and MID+RID formats.
+		//
+		// If plain format params are present in a simulcast stream, they are applied to the first video track (backward compatibility).
 
-		// Parse and apply capabilities
 		logtt("%s - Set Oven-Capabilities: %s", GetName().CStr(), capabilities.CStr());
 
 		auto params = ov::String::Split(capabilities.CStr(), ",");
 
-		std::optional<int> max_width;
-		std::optional<int> max_height;
-		std::optional<double> max_fps;
+		std::optional<int> plain_max_width;
+		std::optional<int> plain_max_height;
+		std::optional<double> plain_max_fps;
+
+		std::map<ov::String, int> rid_max_width;
+		std::map<ov::String, int> rid_max_height;
+		std::map<ov::String, double> rid_max_fps;
 
 		for (const auto &param : params)
 		{
@@ -378,42 +434,156 @@ namespace pvd
 				continue;
 			}
 
-			auto key = key_value[0].Trim().LowerCaseString();
+			auto key   = key_value[0].Trim();
 			auto value = key_value[1].Trim();
-			if (key == "max_width")
+
+			auto key_lower = key.LowerCaseString();
+			if (key_lower.HasPrefix("rid:"))
 			{
-				max_width = std::atoi(value.CStr());
+				// RID format: rid:<rid_id>:<field>
+				// rid_id preserves original case to match _simulcast_track_map keys from SDP
+				auto parts = ov::String::Split(key.CStr(), ":");
+				if (parts.size() != 3)
+				{
+					continue;
+				}
+
+				const auto &rid_id = parts[1];
+				auto field = parts[2].LowerCaseString();
+
+				if (field == "max_width")
+				{
+					auto v = ov::Converter::ToInt32(value.CStr());
+					if (v > 0) rid_max_width[rid_id] = v;
+				}
+				else if (field == "max_height")
+				{
+					auto v = ov::Converter::ToInt32(value.CStr());
+					if (v > 0) rid_max_height[rid_id] = v;
+				}
+				else if (field == "max_fps")
+				{
+					auto v = ov::Converter::ToDouble(value.CStr());
+					if (v > 0) rid_max_fps[rid_id] = v;
+				}
 			}
-			else if (key == "max_height")
+			else if (key_lower.HasPrefix("mid:"))
 			{
-				max_height = std::atoi(value.CStr());
+				// MID+RID format: mid:<mid_id>:rid:<rid_id>:<field>
+				// e.g. "mid:0:rid:high:max_width" → mid_rid_key = "0:high", field = "max_width"
+				auto parts = ov::String::Split(key.CStr(), ":");
+				if (parts.size() != 5 || parts[2].LowerCaseString() != "rid")
+				{
+					continue;
+				}
+
+				// Build the same "mid:rid" composite key used in _simulcast_track_map
+				auto mid_rid_key = parts[1] + ":" + parts[3];
+				auto field = parts[4].LowerCaseString();
+
+				if (field == "max_width")
+				{
+					auto v = ov::Converter::ToInt32(value.CStr());
+					if (v > 0) rid_max_width[mid_rid_key] = v;
+				}
+				else if (field == "max_height")
+				{
+					auto v = ov::Converter::ToInt32(value.CStr());
+					if (v > 0) rid_max_height[mid_rid_key] = v;
+				}
+				else if (field == "max_fps")
+				{
+					auto v = ov::Converter::ToDouble(value.CStr());
+					if (v > 0) rid_max_fps[mid_rid_key] = v;
+				}
 			}
-			else if (key == "max_fps")
+			else
 			{
-				max_fps = std::atof(value.CStr());
+				// Plain format: applied to the first video track
+				if (key_lower == "max_width")
+				{
+					auto v = ov::Converter::ToInt32(value.CStr());
+					if (v > 0) plain_max_width = v;
+				}
+				else if (key_lower == "max_height")
+				{
+					auto v = ov::Converter::ToInt32(value.CStr());
+					if (v > 0) plain_max_height = v;
+				}
+				else if (key_lower == "max_fps")
+				{
+					auto v = ov::Converter::ToDouble(value.CStr());
+					if (v > 0) plain_max_fps = v;
+				}
 			}
 		}
 
-		if (max_width.has_value() && max_height.has_value())
+		// Apply plain params to the first video track
+		if (plain_max_width.has_value() && plain_max_height.has_value())
 		{
 			auto first_video_track = GetFirstTrackByType(cmn::MediaType::Video);
 			if (first_video_track != nullptr)
 			{
-				first_video_track->SetResolution(max_width.value(), max_height.value());
+				first_video_track->SetResolution(plain_max_width.value(), plain_max_height.value());
 
 				auto max_resolution = first_video_track->GetMaxResolution();
 				logtt("%s - Set max resolution: %s", GetName().CStr(), max_resolution.ToString().CStr());
 			}
 		}
 
-		if (max_fps.has_value())
+		if (plain_max_fps.has_value())
 		{
 			auto first_video_track = GetFirstTrackByType(cmn::MediaType::Video);
 			if (first_video_track != nullptr)
 			{
-				first_video_track->SetMaxFrameRate(max_fps.value());
+				first_video_track->SetMaxFrameRate(plain_max_fps.value());
 
 				logtt("%s - Set max fps: %.2f", GetName().CStr(), first_video_track->GetMaxFrameRate());
+			}
+		}
+
+		// Apply RID params to the corresponding simulcast track (_simulcast_track_map is empty for unicast, so this loop is a no-op)
+		for (const auto &[key, track_id] : _simulcast_track_map)
+		{
+			// _simulcast_track_map key is "mid:rid" (MID present) or "rid" (no MID).
+			// rid_max_* maps may be keyed by:
+			//   - "mid:rid" composite key (format 3: mid:0:rid:high:max_width=...)
+			//   - "rid" only             (format 2: rid:high:max_width=...)
+			//
+			// Try the full key first (handles format 3 and no-MID format 2).
+			// Fall back to the RID-only suffix (last ':'-token) to handle the common case
+			// where the sender uses RID-only format but the SDP contains a MID extension,
+			// making the internal key "mid:rid" (e.g. "0:high") while the header says "rid:high".
+			//
+			// Examples:
+			//   key="0:high", rid_max_* has "0:high" → direct hit  (format 3)
+			//   key="0:high", rid_max_* has "high"   → fallback hit (format 2 + MID present)
+			//   key="high",   rid_max_* has "high"   → direct hit  (format 2, no MID)
+			const auto rid_suffix = ov::String(ov::String::Split(key.CStr(), ":").back());
+
+			auto it_width  = rid_max_width.find(key);
+			if (it_width  == rid_max_width.end())  it_width  = rid_max_width.find(rid_suffix);
+			auto it_height = rid_max_height.find(key);
+			if (it_height == rid_max_height.end()) it_height = rid_max_height.find(rid_suffix);
+			auto it_fps    = rid_max_fps.find(key);
+			if (it_fps    == rid_max_fps.end())    it_fps    = rid_max_fps.find(rid_suffix);
+
+			auto track = GetTrack(track_id);
+			if (track != nullptr)
+			{
+				if (it_width != rid_max_width.end() && it_height != rid_max_height.end())
+				{
+					track->SetResolution(it_width->second, it_height->second);
+
+					auto max_resolution = track->GetMaxResolution();
+					logtt("%s - Set max resolution for key(%s): %s", GetName().CStr(), key.CStr(), max_resolution.ToString().CStr());
+				}
+
+				if (it_fps != rid_max_fps.end())
+				{
+					track->SetMaxFrameRate(it_fps->second);
+					logtt("%s - Set max fps for key(%s): %.2f", GetName().CStr(), key.CStr(), track->GetMaxFrameRate());
+				}
 			}
 		}
 	}

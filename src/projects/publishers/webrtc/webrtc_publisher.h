@@ -27,10 +27,11 @@ public:
 	WebRtcPublisher(const cfg::Server &server_config, const std::shared_ptr<MediaRouterInterface> &router);
 	~WebRtcPublisher() override;
 
+	bool Start() override;
 	bool Stop() override;
 
 	// IcePortObserver Implementation
-	void OnStateChanged(IcePort &port, uint32_t session_id, IceConnectionState state, std::any user_data) override;
+	void OnStateChanged(IcePort &port, uint32_t session_id, IceConnectionState state, bool is_expired, std::any user_data) override;
 	void OnDataReceived(IcePort &port, uint32_t session_id, std::shared_ptr<const ov::Data> data, std::any user_data) override;
 
 	// SignallingObserver Implementation
@@ -77,7 +78,6 @@ private:
 		transfer_completed,
 	};
 
-	bool Start() override;
 	bool DisconnectSessionInternal(const std::shared_ptr<RtcSession> &session);
 
 	//--------------------------------------------------------------------
@@ -101,6 +101,8 @@ private:
 	// This is a index used to send ICE Candidate in round-robin
 	// WebRTC Publisher calculates the actual index by doing a modular operation, so it doesn't matter if overflow occurs
 	std::atomic<uint32_t> _current_ice_candidate_index{0};
+	ov::String _default_transport{"UDPTCP"};
+	bool _tcp_relay_force{false};
 
 	std::shared_ptr<IcePort> _ice_port;
 	std::shared_ptr<RtcSignallingServer> _signalling_server;

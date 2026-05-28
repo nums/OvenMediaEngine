@@ -39,7 +39,7 @@ LOCAL_STATIC_LIBRARIES := \
 	web_console \
 	mediarouter \
 	rtsp_module \
-	jitter_buffer \
+	pacer \
 	ovt_packetizer \
 	orchestrator \
 	origin_map_client \
@@ -86,9 +86,6 @@ $(call add_pkg_config,hiredis)
 $(call add_pkg_config,spdlog)
 $(call add_pkg_config,whisper)
 
-ifeq ($(call chk_pkg_exist,ffnvcodec),0)
-$(call add_pkg_config,ffnvcodec)
-endif
 
 # Enable Xilinx Media SDK
 # If libavcodec references libxrm.so, then the XMA library is supported
@@ -103,17 +100,31 @@ HWACCELS_XMA_ENABLED := true
 PROJECT_CXXFLAGS += -DHWACCELS_XMA_ENABLED
 endif
 
-# Enable NVidia Accelerator
+
+# Enable Nvidia Accelerator
 ifeq ($(and \
   $(filter 0,$(call chk_lib_exist,libcuda.so)), \
-  $(filter 0,$(call chk_lib_exist,libcudart.so)), \
   $(filter 0,$(call chk_lib_exist,libnvidia-ml.so)), \
-  $(filter 0,$(call chk_exe_exist,nvcc)) \
+  $(filter 0,$(call chk_exe_exist,nvcc)), \
+  $(filter 0,$(call chk_pkg_exist,ffnvcodec)) \
 ), 0)
+$(call add_pkg_config,ffnvcodec)
 HWACCELS_NVIDIA_ENABLED := true
 PROJECT_CXXFLAGS += -I/usr/local/cuda/include -DHWACCELS_NVIDIA_ENABLED
-LOCAL_LDFLAGS += -L/usr/local/cuda/lib64 -L/usr/local/cuda/lib64/stubs -lcuda -lcudart -lnvidia-ml
+LOCAL_LDFLAGS += -L/usr/local/cuda/lib64 -L/usr/local/cuda/lib64/stubs -Wl,-Bstatic -lcudart_static -Wl,-Bdynamic -lcuda -lnvidia-ml -lrt -ldl
+
 endif
+
+# Whisper GGML
+LOCAL_LDFLAGS += -lggml-cpu -lgomp
+ifeq ($(HWACCELS_NVIDIA_ENABLED), true)
+ifeq ($(call chk_file_exist,$(CONFIG_LIBRARY_PATHS),libwhisper.so), 0)
+LOCAL_LDFLAGS += -lggml-cuda
+else
+LOCAL_LDFLAGS += -Wl,-Bstatic -lggml-cuda -lcublas_static -lcublasLt_static -lculibos -Wl,-Bdynamic  
+endif
+endif
+
 
 # Enable Netint Accelerator
 ifeq ($(call chk_lib_exist,libxcoder_logan.so), 0)

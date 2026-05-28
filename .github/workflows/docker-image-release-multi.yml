@@ -11,7 +11,8 @@ on:
         type: string
 
 env:
-  IMAGE_NAME: airensoft/ovenmediaengine
+  IMAGE_NAME: ovenmedialabs/ovenmediaengine
+  MIRROR_IMAGE_NAME: airensoft/ovenmediaengine
   VERSION: ${{ github.event.release.tag_name || github.event.inputs.version }}
 
 jobs:
@@ -52,6 +53,12 @@ jobs:
             --tag ${{ env.IMAGE_NAME }}:${{ env.VERSION }}-amd64 \
             .
 
+      - name: Copy amd64 image to airensoft
+        run: |
+          docker buildx imagetools create \
+            --tag ${{ env.MIRROR_IMAGE_NAME }}:${{ env.VERSION }}-amd64 \
+            ${{ env.IMAGE_NAME }}:${{ env.VERSION }}-amd64
+
       - name: Notify Done (amd64)
         if: always()
         uses: slackapi/slack-github-action@v1.26.0
@@ -66,8 +73,18 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.ACTION_STATE_NOTIFICATION_SLACK_WEBHOOK_URL }}
 
   build_arm64:
-    name: Build arm64 Image
+    name: Build arm64 Image (${{ matrix.page_variant.name }})
     runs-on: ubuntu-22.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        page_variant:
+          - name: 4K pages
+            suffix: arm64
+            jemalloc_lg_page_max: false
+          - name: 16K pages
+            suffix: arm64-16k
+            jemalloc_lg_page_max: true
     steps:
       - name: Notify Start (arm64)
         uses: slackapi/slack-github-action@v1.26.0
@@ -75,7 +92,7 @@ jobs:
           payload: |
             {
               "branch": "${{ env.VERSION }}",
-              "tag": "${{ env.VERSION }} (arm64 by ${{ github.actor }})",
+              "tag": "${{ env.VERSION }}-${{ matrix.page_variant.suffix }} by ${{ github.actor }}",
               "state": "Started"
             }
         env:
@@ -98,9 +115,16 @@ jobs:
         run: |
           docker buildx build \
             --platform linux/arm64 \
+            --build-arg OME_ENABLE_JEMALLOC_LG_PAGE_MAX=${{ matrix.page_variant.jemalloc_lg_page_max }} \
             --output=type=image,push=true \
-            --tag ${{ env.IMAGE_NAME }}:${{ env.VERSION }}-arm64 \
+            --tag ${{ env.IMAGE_NAME }}:${{ env.VERSION }}-${{ matrix.page_variant.suffix }} \
             .
+
+      - name: Copy arm64 image to airensoft
+        run: |
+          docker buildx imagetools create \
+            --tag ${{ env.MIRROR_IMAGE_NAME }}:${{ env.VERSION }}-${{ matrix.page_variant.suffix }} \
+            ${{ env.IMAGE_NAME }}:${{ env.VERSION }}-${{ matrix.page_variant.suffix }}
 
       - name: Notify Done (arm64)
         if: always()
@@ -109,7 +133,7 @@ jobs:
           payload: |
             {
               "branch": "${{ env.VERSION }}",
-              "tag": "${{ env.VERSION }} (arm64 by ${{ github.actor }})",
+              "tag": "${{ env.VERSION }}-${{ matrix.page_variant.suffix }} by ${{ github.actor }}",
               "state": "${{ job.status }}"
             }
         env:
@@ -152,7 +176,19 @@ jobs:
             --tag ${{ env.IMAGE_NAME }}:latest \
             ${{ env.IMAGE_NAME }}:${{ env.VERSION }}-amd64 \
             ${{ env.IMAGE_NAME }}:${{ env.VERSION }}-arm64
-            
+
+      - name: Create and push manifest for airensoft
+        run: |
+          docker buildx imagetools create \
+            --tag ${{ env.MIRROR_IMAGE_NAME }}:${{ env.VERSION }} \
+            ${{ env.MIRROR_IMAGE_NAME }}:${{ env.VERSION }}-amd64 \
+            ${{ env.MIRROR_IMAGE_NAME }}:${{ env.VERSION }}-arm64
+
+          docker buildx imagetools create \
+            --tag ${{ env.MIRROR_IMAGE_NAME }}:latest \
+            ${{ env.MIRROR_IMAGE_NAME }}:${{ env.VERSION }}-amd64 \
+            ${{ env.MIRROR_IMAGE_NAME }}:${{ env.VERSION }}-arm64
+
       - name: Notify Done (manifest)
         if: always()
         uses: slackapi/slack-github-action@v1.26.0

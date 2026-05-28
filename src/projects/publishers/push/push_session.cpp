@@ -70,16 +70,14 @@ namespace pub
 		auto writer = CreateWriter();
 		if (writer == nullptr)
 		{
-			SetState(SessionState::Error);
-			push->SetState(info::Push::PushState::Error);
+			SetErrorState(push);
 			logte("Failed to create session. %s", push->GetInfoString().CStr());
 			return false;
 		}
 
 		if (writer->SetUrl(dest_url, ffmpeg::compat::GetFormatByProtocolType(push->GetProtocolType())) == false)
 		{
-			SetState(SessionState::Error);
-			push->SetState(info::Push::PushState::Error);
+			SetErrorState(push);
 			logte("Failed to set URL. Reason(%s), %s", writer->GetErrorMessage().CStr(), push->GetInfoString().CStr());
 			return false;
 		}
@@ -166,15 +164,21 @@ namespace pub
 		// Notice: If there are more than one video track, RTMP Push is not created and returns an error. You must use 1 video track.
 		if (writer->Start() == false)
 		{
-			SetState(SessionState::Error);
-			push->SetState(info::Push::PushState::Error);
+			SetErrorState(push);
 			logte("Failed to start session. Reason(%s), %s", writer->GetErrorMessage().CStr(), push->GetInfoString().CStr());
+			return false;
+		}
+
+		if (StartSenderThread() == false)
+		{
+			SetErrorState(push, writer);
+			logte("Failed to start sender thread. %s", push->GetInfoString().CStr());
 			return false;
 		}
 
 		push->SetState(info::Push::PushState::Pushing);
 
-		logtt("PushSession(%d) has started.", GetId());
+		logtd("PushSession(%d) has started.", GetId());
 
 		return Session::Start();
 	}
@@ -193,6 +197,8 @@ namespace pub
 
 			writer->Stop();
 
+			StopSenderThread();
+
 			if (push != nullptr)
 			{
 				push->SetState(info::Push::PushState::Stopped);
@@ -201,7 +207,7 @@ namespace pub
 
 			DestoryWriter();
 
-			logtt("PushSession(%d) has stopped", GetId());
+			logtd("PushSession(%d) has stopped", GetId());
 		}
 
 		return Session::Stop();
@@ -210,6 +216,11 @@ namespace pub
 	void PushSession::SendOutgoingData(const std::any &packet)
 	{
 		if (GetState() != SessionState::Started)
+		{
+			return;
+		}
+
+		if (_sender_stop_flag.load())
 		{
 			return;
 		}
@@ -231,37 +242,123 @@ namespace pub
 			return;
 		}
 
-		auto writer = GetWriter();
-		if (writer == nullptr)
+		_sender_packet_queue.Enqueue(std::move(session_packet));
+	}
+
+	bool PushSession::StartSenderThread()
+	{
+		StopSenderThread();
+
+		auto stream = GetStream();
+		if (stream != nullptr)
 		{
-			return;
+			auto urn = std::make_shared<info::ManagedQueue::URN>(
+				stream->GetApplicationInfo().GetVHostAppName(),
+				stream->GetName(),
+				"pub",
+				ov::String::FormatString("push_session_%u", GetId()).LowerCaseString());
+			_sender_packet_queue.SetUrn(urn);
 		}
 
-		auto push = GetPush();
-		if (push == nullptr)
+		_sender_packet_queue.SetThreshold(100);
+		_sender_packet_queue.Clear();
+
+		_sender_stop_flag = false;
+		_sender_thread = std::thread(&PushSession::SenderThread, this);
+		pthread_setname_np(_sender_thread.native_handle(), ov::String::FormatString("PushSess-%u", GetId()).CStr());
+
+		return true;
+	}
+
+	void PushSession::StopSenderThread()
+	{
+		_sender_stop_flag = true;
+
+		if (_sender_thread.joinable())
 		{
-			return;
+			_sender_thread.join();
 		}
 
-		uint64_t sent_bytes = 0;
+		_sender_packet_queue.Clear();
+	}
 
-		bool ret = writer->SendPacket(session_packet, &sent_bytes);
-		if (ret == false)
+	void PushSession::SenderThread()
+	{
+		ov::logger::ThreadHelper thread_helper;
+
+		constexpr auto kThresholdGraceDuration = std::chrono::seconds(10);
+
+		while (_sender_stop_flag.load() == false)
 		{
-			logte("Failed to send packet. session will be terminated. Reason(%s), %s", writer->GetErrorMessage().CStr(), push->GetInfoString().CStr());
+			auto item = _sender_packet_queue.Dequeue(100);
+			if (item.has_value() == false)
+			{
+				// Timeout or Stop is called. 
+				continue;
+			}
 
+			auto session_packet = item.value();
+			if (session_packet == nullptr)
+			{
+				continue;
+			}
+
+			auto writer = GetWriter();
+			if (writer == nullptr)
+			{
+				continue;
+			}
+
+			auto push = GetPush();
+			if (push == nullptr)
+			{
+				continue;
+			}
+
+			if (_sender_packet_queue.IsThresholdExceededFor(kThresholdGraceDuration))
+			{
+				logte("Push session queue exceeded state persisted for more than %ld seconds. Terminating session. %s",
+					  std::chrono::duration_cast<std::chrono::seconds>(kThresholdGraceDuration).count(), push->GetInfoString().CStr());
+
+				SetErrorState(push, writer);
+				_sender_stop_flag = true;
+
+				continue;
+			}
+			
+			// Debug sleep to simulate slow network or processing. Remove this in production.
+			// std::this_thread::sleep_for(std::chrono::milliseconds(ov::Random::GenerateUInt32(2, 15)));
+
+			uint64_t sent_bytes = 0;
+			bool ret = writer->SendPacket(session_packet, &sent_bytes);
+			if (ret == false)
+			{
+				logte("Failed to send packet. session will be terminated. Reason(%s), %s", writer->GetErrorMessage().CStr(), push->GetInfoString().CStr());
+
+				SetErrorState(push, writer);
+				_sender_stop_flag = true;
+
+				continue;
+			}
+
+			push->UpdatePushTime();
+			push->IncreasePushBytes(sent_bytes);
+
+			MonitorInstance->IncreaseBytesOut(*GetStream(), PublisherType::Push, sent_bytes);
+		}
+	}
+
+	void PushSession::SetErrorState(const std::shared_ptr<info::Push> &push, const std::shared_ptr<ffmpeg::Writer> &writer)
+	{
+		if (writer != nullptr)
+		{
 			writer->Stop();
-
-			SetState(SessionState::Error);
-			push->SetState(info::Push::PushState::Error);
-
-			return;
 		}
-
-		push->UpdatePushTime();
-		push->IncreasePushBytes(sent_bytes);
-
-		MonitorInstance->IncreaseBytesOut(*GetStream(), PublisherType::Push, sent_bytes);
+		SetState(SessionState::Error);
+		if (push != nullptr)
+		{
+			push->SetState(info::Push::PushState::Error);
+		}
 	}
 
 	std::shared_ptr<ffmpeg::Writer> PushSession::CreateWriter()
@@ -401,7 +498,7 @@ namespace pub
 			}
 		}
 
-		logtd("PushSession(%d) - Adding track. trackId:%d, variantName: %s", GetId(), track->GetId(), track->GetVariantName().CStr());
+		logtd("PushSession(%d) Adding track. trackId:%d, variantName: %s", GetId(), track->GetId(), track->GetVariantName().CStr());
 
 		return writer->AddTrack(track);
 	}

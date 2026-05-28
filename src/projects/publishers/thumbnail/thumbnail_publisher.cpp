@@ -288,31 +288,38 @@ std::shared_ptr<ThumbnailInterceptor> ThumbnailPublisher::CreateInterceptor()
 			}
 		}
 
-		// Check CORS
-		auto application = std::static_pointer_cast<ThumbnailApplication>(GetApplicationByName(vhost_app_name));
-		if (application == nullptr)
+		if (vhost_app_name.IsValid() == false)
 		{
-			logte("Cannot find application (%s)", vhost_app_name.CStr());
-			response->AppendString("Could not found application of thumbnail publisher");
+			logte("Could not resolve application name from domain: %s", request_url->Host().CStr());
+			response->AppendString("Could not resolve application name from domain");
 			response->SetStatusCode(http::StatusCode::NotFound);
 			return http::svr::NextHandler::DoNotCall;
 		}
 
-		application->GetCorsManager().SetupHttpCorsHeader(vhost_app_name, request, response);
-
-		// Check Stream
-		auto stream = GetStream(vhost_app_name, request_url->Stream());		
+		// PullStream may create the app from the wildcard template
+		auto application = std::static_pointer_cast<ThumbnailApplication>(GetApplicationByName(vhost_app_name));
+		auto stream = GetStream(vhost_app_name, request_url->Stream());
 		if (stream == nullptr)
 		{
-			// If the stream does not exists, request to the provider
 			stream = PullStream(request_url, vhost_app_name, host_name, stream_name);
-			if (stream == nullptr)
+			if (stream != nullptr && application == nullptr)
 			{
-				logte("There is no stream or cannot pull a stream. stream(%s)", request_url->Stream().CStr());
-				response->AppendString("There is no stream or cannot pull a stream");
-				response->SetStatusCode(http::StatusCode::NotFound);			
-				return http::svr::NextHandler::DoNotCall;
-			}			
+				application = std::static_pointer_cast<ThumbnailApplication>(GetApplicationByName(vhost_app_name));
+			}
+		}
+
+		// Apply CORS once the application is known so error responses still carry the headers
+		if (application != nullptr)
+		{
+			application->GetCorsManager().SetupHttpCorsHeader(vhost_app_name, request, response);
+		}
+
+		if (application == nullptr || stream == nullptr)
+		{
+			logte("There is no stream or cannot pull a stream. stream(%s)", request_url->Stream().CStr());
+			response->AppendString("There is no stream or cannot pull a stream");
+			response->SetStatusCode(http::StatusCode::NotFound);
+			return http::svr::NextHandler::DoNotCall;
 		}
 
 		if(stream->GetState() != pub::Stream::State::STARTED)

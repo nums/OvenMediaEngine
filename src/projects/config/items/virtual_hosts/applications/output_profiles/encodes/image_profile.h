@@ -28,7 +28,7 @@ namespace cfg
 					int _height		  = 0;
 					double _framerate = 0.0;
 					BypassIfMatch _bypass_if_match;
-					int _skip_frames = 0;
+					int _skip_frames = -1;
 
 				public:
 					CFG_DECLARE_CONST_REF_GETTER_OF(GetName, _name)
@@ -61,7 +61,7 @@ namespace cfg
 												   logw("Config", "Use SkipFrames in the settings, the Framerate is ignored.");
 											   }
 
-											   return (_skip_frames >= 0 && _skip_frames <= 120) ? nullptr : CreateConfigErrorPtr("SkipFrames must be between 0 and 120");
+											   return (_skip_frames >= -1 && _skip_frames <= 120) ? nullptr : CreateConfigErrorPtr("SkipFrames must be -1 or between 0 and 120");
 										   });
 						Register<Optional>("BypassIfMatch", &_bypass_if_match);
 					}

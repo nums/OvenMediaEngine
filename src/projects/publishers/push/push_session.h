@@ -13,6 +13,7 @@
 #include <base/publisher/session.h>
 #include <modules/ffmpeg/writer.h>
 #include <modules/ffmpeg/compat.h>
+#include <modules/managed_queue/managed_queue.h>
 
 #include "base/info/push.h"
 
@@ -48,10 +49,20 @@ namespace pub
 		bool IsSupportTrack(const info::Push::ProtocolType protocol_type, const std::shared_ptr<MediaTrack> &track);
 		bool IsSupportCodec(const info::Push::ProtocolType protocol_type, cmn::MediaCodecId codec_id);
 
+		void SetErrorState(const std::shared_ptr<info::Push> &push, const std::shared_ptr<ffmpeg::Writer> &writer = nullptr);
+
+		bool StartSenderThread();
+		void StopSenderThread();
+		void SenderThread();
+
 		std::shared_ptr<info::Push> _push = nullptr;
-		std::shared_mutex _push_mutex;		
+		std::shared_mutex _push_mutex;
 
 		std::shared_ptr<ffmpeg::Writer> _writer = nullptr;
 		std::shared_mutex _writer_mutex;
+
+		ov::ManagedQueue<std::shared_ptr<MediaPacket>> _sender_packet_queue;
+		std::thread _sender_thread;
+		std::atomic<bool> _sender_stop_flag{true};
 	};
 }  // namespace pub

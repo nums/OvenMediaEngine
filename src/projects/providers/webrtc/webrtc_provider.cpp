@@ -45,6 +45,13 @@ namespace pvd
 
 	bool WebRTCProvider::StartSignallingServers(const cfg::Server &server_config, const cfg::bind::cmm::Webrtc &webrtc_bind_config)
 	{
+		if ((_signalling_server == nullptr) || (_whip_server == nullptr))
+		{
+			// `Start()` skipped signalling-server construction because no ports were configured.
+			logtw("%s is disabled - No port is configured", GetProviderName());
+			return true;
+		}
+
 		auto &signalling_config = webrtc_bind_config.GetSignalling();
 
 		bool is_configured;
@@ -56,24 +63,15 @@ namespace pvd
 		bool is_tls_port_configured;
 		auto &tls_port_config = signalling_config.GetTlsPort(&is_tls_port_configured);
 
-		if ((is_port_configured == false) && (is_tls_port_configured == false))
-		{
-			logtw("%s is disabled - No port is configured", GetProviderName());
-			return true;
-		}
-
-		auto rtc_signalling_server	 = std::make_shared<RtcSignallingServer>(server_config, webrtc_bind_config);
 		auto rtc_signalling_observer = RtcSignallingObserver::GetSharedPtr();
-
-		auto whip_server			 = std::make_shared<WhipServer>(webrtc_bind_config);
 
 		do
 		{
 			const auto &ip_list = server_config.GetIPList();
 
 			// Initialize WebSocket Server
-			rtc_signalling_server->AddObserver(rtc_signalling_observer);
-			if (rtc_signalling_server->Start(
+			_signalling_server->AddObserver(rtc_signalling_observer);
+			if (_signalling_server->Start(
 					GetProviderName(), "RtcSig",
 					ip_list,
 					is_port_configured, port_config.GetPort(),
@@ -84,7 +82,7 @@ namespace pvd
 			}
 
 			// Initialize WHIP Server
-			if (whip_server->Start(
+			if (_whip_server->Start(
 					WhipObserver::GetSharedPtr(),
 					GetProviderName(), "WhpSig",
 					ip_list,
@@ -95,56 +93,106 @@ namespace pvd
 				break;
 			}
 
-			_signalling_server = std::move(rtc_signalling_server);
-			_whip_server	   = std::move(whip_server);
-
 			return true;
 		} while (false);
 
-		OV_SAFE_RESET(
-			rtc_signalling_server, nullptr, {
-				rtc_signalling_server->RemoveObserver(rtc_signalling_observer);
-				rtc_signalling_server->Stop();
-			},
-			rtc_signalling_server);
-		OV_SAFE_RESET(whip_server, nullptr, whip_server->Stop(), whip_server);
+		if (_signalling_server != nullptr)
+		{
+			_signalling_server->RemoveObserver(rtc_signalling_observer);
+			_signalling_server->Stop();
+			_signalling_server.reset();
+		}
+		if (_whip_server != nullptr)
+		{
+			_whip_server->Stop();
+			_whip_server.reset();
+		}
 
 		return false;
 	}
 
 	bool WebRTCProvider::StartICEPorts(const cfg::Server &server_config, const cfg::bind::cmm::Webrtc &webrtc_bind_config)
 	{
-		auto ice_port = IcePortManager::GetInstance()->CreateTurnServers(
+		// `_ice_port` is created by `Start()` so back-fill callbacks can find it. Here we only
+		// bind the TURN listeners.
+		if (_ice_port == nullptr)
+		{
+			logte("ICE port was not initialized");
+			return false;
+		}
+
+		return IcePortManager::GetInstance()->BindTurnServers(
 			GetProviderName(),
 			IcePortObserver::GetSharedPtr(),
 			server_config, webrtc_bind_config);
-
-		if (ice_port == nullptr)
-		{
-			return false;
-		}
-
-		_ice_port	 = ice_port;
-
-		_certificate = CreateCertificate();
-
-		if (_certificate == nullptr)
-		{
-			logte("Could not create certificate.");
-			return false;
-		}
-
-		return true;
 	}
 
 	bool WebRTCProvider::Start()
 	{
-		auto server_config		= GetServerConfig();
+		// Infrastructure setup only - no listener bind. Listeners are opened by `Bind()` which
+		// `main.cpp` calls explicitly after `RestorePullStreams()` (Enterprise) or after
+		// `StartServer()` (OSS). Back-fill notifications fired by the later normal
+		// `CreateVirtualHosts()` / `CreateApplication()` flow find every member non-null.
+		const auto &server_config = GetServerConfig();
 		auto webrtc_bind_config = server_config.GetBind().GetProviders().GetWebrtc();
 
 		if (webrtc_bind_config.IsParsed() == false)
 		{
 			logtw("%s is disabled by configuration", GetProviderName());
+			return true;
+		}
+
+		_default_transport = webrtc_bind_config.GetIceCandidates().GetDefaultTransport().UpperCaseString();
+		_tcp_relay_force   = webrtc_bind_config.GetIceCandidates().IsTcpRelayForce();
+
+		// Create ICE port (no TURN bind yet). `OnCreateProviderApplication()` needs `_ice_port`
+		// to be non-null when it constructs a `WebRTCApplication`.
+		_ice_port		   = IcePortManager::GetInstance()->CreatePort(IcePortObserver::GetSharedPtr());
+		if (_ice_port == nullptr)
+		{
+			logte("Could not initialize ICE port. Check your ICE configuration");
+			return false;
+		}
+
+		// Load certificate from disk.
+		_certificate = CreateCertificate();
+		if (_certificate == nullptr)
+		{
+			logte("Could not create certificate.");
+			IcePortManager::GetInstance()->Release(IcePortObserver::GetSharedPtr());
+			_ice_port = nullptr;
+			return false;
+		}
+
+		auto &signalling_config = webrtc_bind_config.GetSignalling();
+		bool is_port_configured;
+		signalling_config.GetPort(&is_port_configured);
+		bool is_tls_port_configured;
+		signalling_config.GetTlsPort(&is_tls_port_configured);
+
+		if (is_port_configured || is_tls_port_configured)
+		{
+			// Construct signalling/WHIP servers (no listener bind yet) so `OnCreateHost()` /
+			// `OnUpdateCertificate()` can insert certificates during the StartServer notification
+			// pass before `Bind()` opens the listeners.
+			_signalling_server = std::make_shared<RtcSignallingServer>(server_config, webrtc_bind_config);
+			_whip_server	   = std::make_shared<WhipServer>(webrtc_bind_config);
+		}
+
+		// Mark module available so the macro registers it. Base `Provider::Start()` does only
+		// `SetModuleAvailable(true)` + log; `PushProvider::Start()` (task runner thread) is
+		// deferred to `Bind()`.
+		return Provider::Start();
+	}
+
+	bool WebRTCProvider::Bind()
+	{
+		const auto &server_config = GetServerConfig();
+		auto webrtc_bind_config = server_config.GetBind().GetProviders().GetWebrtc();
+
+		if (webrtc_bind_config.IsParsed() == false)
+		{
+			// `Start()` already logged the disabled state; nothing to bind.
 			return true;
 		}
 
@@ -154,9 +202,23 @@ namespace pvd
 			return PushProvider::Start();
 		}
 
-		logte("An error occurred while initialize %s. Stopping RtcSignallingServer...", GetProviderName());
+		logte("An error occurred while binding %s listeners. Stopping RtcSignallingServer...", GetProviderName());
 
 		IcePortManager::GetInstance()->Release(IcePortObserver::GetSharedPtr());
+		_ice_port = nullptr;
+
+		if (_signalling_server != nullptr)
+		{
+			_signalling_server->RemoveObserver(RtcSignallingObserver::GetSharedPtr());
+			_signalling_server->Stop();
+			_signalling_server.reset();
+		}
+
+		if (_whip_server != nullptr)
+		{
+			_whip_server->Stop();
+			_whip_server.reset();
+		}
 
 		return false;
 	}
@@ -388,18 +450,56 @@ namespace pvd
 			return nullptr;
 		}
 
-		auto transport = final_url->GetQueryValue("transport");
-		if (transport.UpperCaseString() == "TCP")
+		auto transport = final_url->GetQueryValue("transport").UpperCaseString();
+		// ?transport policy (falls back to <DefaultTransport> config when not specified):
+		//   udp      → UDP candidates only
+		//   tcp      → TCP direct-ICE candidates only (RFC 6544)
+		//   relay    → unreachable dummy candidate + tcp_relay=true; direct pairs fail, client must use TURN relay
+		//   udptcp   → all direct candidates (UDP + TCP)
+		//   all      → all direct candidates (UDP + TCP) + tcp_relay=true (relay fallback)
+		// <DefaultTransport> default: udptcp
+		if (transport.IsEmpty())
 		{
-			tcp_relay = true;
+			transport = _default_transport;
 		}
 
-		if (_ice_candidate_list.empty() == false)
+		// TcpRelayForce=true globally forces relay-only behavior (same as ?transport=relay)
+		if (_tcp_relay_force)
 		{
-			auto candidate_index_to_send = _current_ice_candidate_index++ % _ice_candidate_list.size();
-			const auto &candidates		 = _ice_candidate_list[candidate_index_to_send];
+			transport = "RELAY";
+		}
 
-			ice_candidates->insert(ice_candidates->end(), candidates.cbegin(), candidates.cend());
+		const auto &udp_groups = _udp_candidate_groups;
+		const auto &tcp_groups = _tcp_candidate_groups;
+		auto index = _current_ice_candidate_index++;
+
+		if (transport == "UDP")
+		{
+			if (!udp_groups.empty())
+				for (const auto &c : udp_groups[index % udp_groups.size()])
+					ice_candidates->push_back(c);
+		}
+		else if (transport == "TCP")
+		{
+			if (!tcp_groups.empty())
+				for (const auto &c : tcp_groups[index % tcp_groups.size()])
+					ice_candidates->push_back(c);
+		}
+		else if (transport == "RELAY")
+		{
+			tcp_relay = true;
+			ice_candidates->push_back(RtcIceCandidate("UDP", RELAY_MODE_DUMMY_IP4_CANDIDATE, RELAY_MODE_DUMMY_PORT, 0, ""));
+		}
+		else
+		{
+			// ALL: UDP + TCP + relay fallback; UDPTCP or unknown: UDP + TCP, no relay
+			if (transport == "ALL") tcp_relay = true;
+			if (!udp_groups.empty())
+				for (const auto &c : udp_groups[index % udp_groups.size()])
+					ice_candidates->push_back(c);
+			if (!tcp_groups.empty())
+				for (const auto &c : tcp_groups[index % tcp_groups.size()])
+					ice_candidates->push_back(c);
 		}
 
 		auto session_description = std::make_shared<SessionDescription>(*application->GetOfferSDP());
@@ -564,7 +664,7 @@ namespace pvd
 	// IcePort
 	//------------------------
 
-	void WebRTCProvider::OnStateChanged(IcePort &port, uint32_t session_id, IceConnectionState state, std::any user_data)
+	void WebRTCProvider::OnStateChanged(IcePort &port, uint32_t session_id, IceConnectionState state, [[maybe_unused]] bool is_expired, std::any user_data)
 	{
 		logtt("WebRTCProvider::OnStateChanged : %d", static_cast<int>(state));
 
@@ -712,16 +812,55 @@ namespace pvd
 			return {http::StatusCode::Conflict, "Stream is already exist"};
 		}
 
-		std::set<IceCandidate> ice_candidates;
-		if (_ice_candidate_list.empty() == false)
+		auto transport = final_url->GetQueryValue("transport").UpperCaseString();
+		// ?transport policy (falls back to <DefaultTransport> config when not specified):
+		//   udp     → UDP candidates only
+		//   tcp     → TCP direct-ICE candidates only (RFC 6544)
+		//   relay   → unreachable dummy candidate + TURN Link headers; direct pairs fail, client must use TURN relay
+		//   udptcp  → all direct candidates (UDP + TCP)
+		//   all     → all direct candidates (UDP + TCP) + Link headers (relay fallback)
+		// <DefaultTransport> default: udptcp
+		if (transport.IsEmpty())
 		{
-			auto candidate_index_to_send = _current_ice_candidate_index++ % _ice_candidate_list.size();
-			const auto &candidates		 = _ice_candidate_list[candidate_index_to_send];
+			transport = _default_transport;
+		}
 
-			for (const auto &candidate : candidates)
-			{
-				ice_candidates.emplace(candidate);
-			}
+		// TcpRelayForce=true globally forces relay-only behavior (same as ?transport=relay)
+		if (_tcp_relay_force)
+		{
+			transport = "RELAY";
+		}
+
+		std::set<IceCandidate> ice_candidates;
+		const auto &udp_groups = _udp_candidate_groups;
+		const auto &tcp_groups = _tcp_candidate_groups;
+		auto index = _current_ice_candidate_index++;
+
+		if (transport == "RELAY")
+		{
+			ice_candidates.emplace(IceCandidate("UDP", ov::SocketAddress::CreateAndGetFirst(RELAY_MODE_DUMMY_IP4_CANDIDATE, RELAY_MODE_DUMMY_PORT)));
+		}
+		else if (transport == "UDP")
+		{
+			if (!udp_groups.empty())
+				for (const auto &c : udp_groups[index % udp_groups.size()])
+					ice_candidates.emplace(c);
+		}
+		else if (transport == "TCP")
+		{
+			if (!tcp_groups.empty())
+				for (const auto &c : tcp_groups[index % tcp_groups.size()])
+					ice_candidates.emplace(c);
+		}
+		else
+		{
+			// ALL: UDP + TCP + relay fallback; UDPTCP or unknown: UDP + TCP, no relay
+			if (!udp_groups.empty())
+				for (const auto &c : udp_groups[index % udp_groups.size()])
+					ice_candidates.emplace(c);
+			if (!tcp_groups.empty())
+				for (const auto &c : tcp_groups[index % tcp_groups.size()])
+					ice_candidates.emplace(c);
 		}
 
 		auto answer_sdp = application->CreateAnswerSDP(offer_sdp, _ice_port->GenerateUfrag(), ice_candidates);

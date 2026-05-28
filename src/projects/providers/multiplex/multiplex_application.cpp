@@ -130,8 +130,8 @@ namespace pvd
 					auto stream_metrics = StreamMetrics(*std::static_pointer_cast<info::Stream>(stream));
 					if (stream_metrics != nullptr)
 					{
-						auto current = std::chrono::high_resolution_clock::now();
-						auto elapsed_time_from_last_recv = std::chrono::duration_cast<std::chrono::milliseconds>(current - stream_metrics->GetLastRecvTime()).count();
+						auto current = std::chrono::steady_clock::now();
+						auto elapsed_time_from_last_recv = std::chrono::duration_cast<std::chrono::milliseconds>(current - stream_metrics->GetLastRecvTimeSteady()).count();
 
 						if (elapsed_time_from_last_recv > _packet_silence_timeout_ms)
 						{
@@ -156,10 +156,17 @@ namespace pvd
                     continue;
                 }
 
-                RemoveMultiplex(multiplex_file_info);
-                logti("Removed multiplex channel : %s/%s (%s)", GetVHostAppName().CStr(), multiplex_file_info._multiplex_profile->GetOutputStreamName().CStr(), multiplex_file_info._file_path.CStr());
+                std::shared_ptr<info::Stream> deleted_stream_info;
+				if (RemoveMultiplex(multiplex_file_info, &deleted_stream_info))
+				{
+					logti("Removed multiplex channel : %s/%s (%s)", GetVHostAppName().CStr(), multiplex_file_info._multiplex_profile->GetOutputStreamName().CStr(), multiplex_file_info._file_path.CStr());
 
-                it = _multiplex_file_info_db.erase(it);
+					it = _multiplex_file_info_db.erase(it);
+				}
+				else
+				{
+					++it;
+				}
             }
             else
             {
@@ -348,7 +355,7 @@ namespace pvd
         return true;
     }
 
-    bool MultiplexApplication::RemoveMultiplex(MultiplexFileInfo &multiplex_file_info)
+    bool MultiplexApplication::RemoveMultiplex(MultiplexFileInfo &multiplex_file_info, [[maybe_unused]] std::shared_ptr<info::Stream> *deleted_stream_info)
     {
         auto stream_name = multiplex_file_info._multiplex_profile->GetOutputStreamName();
 

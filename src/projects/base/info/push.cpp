@@ -208,7 +208,7 @@ namespace info
 	}
 	void Push::UpdatePushTime()
 	{
-		_Push_time = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - _Push_start_time).count();
+		_Push_time = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - _Push_start_time_steady).count();
 	}
 	void Push::IncreaseSequence()
 	{
@@ -221,6 +221,7 @@ namespace info
 	void Push::UpdatePushStartTime()
 	{
 		_Push_start_time = std::chrono::system_clock::now();
+		_Push_start_time_steady = std::chrono::steady_clock::now();
 	}
 	void Push::UpdatePushStopTime()
 	{
@@ -317,11 +318,9 @@ namespace info
 
 	const ov::String Push::GetInfoString()
 	{
-		ov::String info = "";
-
-		info.AppendFormat("uid(%s), vhost(%s) app(%s) stream(%s) -> protocol(%s) url(%s) streamKey(%s) variantNames(%s)",
-						  _id.CStr(), GetVhost().CStr(), GetApplication().CStr(), GetStreamName().CStr(), GetProtocol().CStr(), GetUrl().CStr(), GetStreamKey().CStr(),
-						  GetVariantNames().empty() ? "all" : ov::String::Join(GetVariantNames(), ",").CStr());
+		ov::String info = ov::String::FormatString("uid(%s), vhost(%s) app(%s) stream(%s) -> protocol(%s) url(%s) streamKey(%s), variantNames(%s)",
+								  _id.CStr(), GetVhost().CStr(), GetApplication().CStr(), GetStreamName().CStr(), GetProtocol().CStr(), GetUrl().CStr(), GetStreamKey().CStr(),
+								  GetVariantNames().empty() ? "all" : ov::String::Join(GetVariantNames(), ",").CStr());
 
 		return info;
 	}

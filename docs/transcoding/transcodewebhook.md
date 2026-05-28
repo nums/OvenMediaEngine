@@ -1,8 +1,12 @@
-# TranscodeWebhook
+---
+title: TranscodeWebhook
+description: "Control OvenMediaEngine transcoding per stream dynamically with the TranscodeWebhook HTTP callback."
+sidebar_position: 21
+---
 
 **TranscodeWebhook** allows OvenMediaEngine to use OutputProfiles from the Control Server's response instead of the OutputProfiles in the local configuration (Server.xml). OvenMediaEngine requests OutputProfiles from the Control Server when streams are created, enabling the specification of different profiles for each individual stream.
 
-<figure><img src="../.gitbook/assets/image (1) (1) (1) (1) (1) (1).png" alt=""><figcaption></figcaption></figure>
+![](../images/transcode-webhook.png)
 
 ## Configuration
 
@@ -284,3 +288,67 @@ The `outputProfiles` section in the JSON structure mirrors the configuration in 
   ]
 }
 ```
+
+#### tracksets (optional)
+
+Each entry in `outputProfile` may contain a `tracksets` array. A TrackSet is a named subset of the profile's encodes that the OVT publisher exposes on a dedicated pull URL (`ovt://host:port/app/stream/trackset_name`), so an Edge can pull only a portion of the stream. See [TrackSet (selective track delivery over OVT)](../origin-edge-clustering.md#trackset-selective-track-delivery-over-ovt) for the full feature description.
+
+The JSON shape mirrors the `<TrackSet>` element in `Server.xml`:
+
+| Field                | Type             | Required | Default | Description                                                                                                                                                       |
+| -------------------- | ---------------- | -------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`               | string           | yes      |         | TrackSet name. Used as the trailing path segment of the OVT pull URL.                                                                                             |
+| `strict`             | boolean          | no       | `false` | When `true`, a `videos` or `audios` entry that references a non-existent encode fails output stream creation. When `false`, the entry is warned and skipped.      |
+| `videos`             | array of objects | no       |         | Video encode references to include in this TrackSet. At least one of `videos` or `audios` must be set.                                                            |
+| `audios`             | array of objects | no       |         | Audio encode references to include in this TrackSet. At least one of `videos` or `audios` must be set.                                                            |
+| `videos[].name`      | string           | yes      |         | Name of a video encode declared in the same profile's `encodes.videos`.                                                                                           |
+| `videos[].indexHint` | integer          | no       |         | Optional `GroupIndex` of the source encode's output track, used to disambiguate multi-track encodes.                                                              |
+| `audios[].name`      | string           | yes      |         | Name of an audio encode declared in the same profile's `encodes.audios`.                                                                                          |
+| `audios[].indexHint` | integer          | no       |         | Optional `GroupIndex` of the source encode's output track (for example, to select a single language).                                                             |
+
+Example response with `tracksets` populated:
+
+```json
+{
+  "allowed": true,
+  "outputProfiles": {
+    "outputProfile": [
+      {
+        "name": "default",
+        "outputStreamName": "${OriginStreamName}",
+        "encodes": {
+          "videos": [
+            { "name": "bypass_video", "bypass": true }
+          ],
+          "audios": [
+            { "name": "aac_audio", "codec": "aac", "bitrate": 128000, "samplerate": 48000, "channel": 2 }
+          ]
+        },
+        "playlists": [
+          {
+            "fileName": "default",
+            "name": "default",
+            "renditions": [
+              { "name": "bypass", "video": "bypass_video", "audio": "aac_audio" }
+            ]
+          }
+        ],
+        "tracksets": [
+          {
+            "name": "edge_video_only",
+            "videos": [ { "name": "bypass_video" } ],
+            "audios": []
+          },
+          {
+            "name": "edge_korean_audio",
+            "videos": [ { "name": "bypass_video" } ],
+            "audios": [ { "name": "aac_audio", "indexHint": 1 } ]
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The `tracksets` field is fully backward compatible. Existing Control Servers that do not return the field, or that return an empty array, produce exactly the same OutputProfile behavior as before this feature was introduced.

@@ -1,4 +1,8 @@
-# TLS Encryption
+---
+title: TLS Encryption
+description: "Enable TLS encryption in OvenMediaEngine by linking certificates, including certificate setup for Docker deployments."
+sidebar_position: 8
+---
 
 Most browsers can't load resources via HTTP and WS (WebSocket) from HTTPS web pages secured with TLS. Therefore, if the player is on an HTTPS page, the player must request streaming through `https` and `wss` URLs secured with TLS. In this case, you must apply the TLS certificate to the OvenMediaEngine.
 
@@ -76,9 +80,9 @@ Add your certificate files to as follows:
                 <Name>*</Name>
             </Names>
             <TLS>
-                <CertPath>/etc/pki/airensoft.com/_airensoft_com.crt</CertPath>
-                <KeyPath>/etc/pki/airensoft.com/_airensoft_com.key</KeyPath>
-                <ChainCertPath>/etc/pki/airensoft.com/_airensoft_com.ca-bundle</ChainCertPath>
+                <CertPath>/etc/pki/ovenmedialabs.com/_ovenmedialabs_com.crt</CertPath>
+                <KeyPath>/etc/pki/ovenmedialabs.com/_ovenmedialabs_com.key</KeyPath>
+                <ChainCertPath>/etc/pki/ovenmedialabs.com/_ovenmedialabs_com.ca-bundle</ChainCertPath>
             </TLS>
         </Host>
         ...

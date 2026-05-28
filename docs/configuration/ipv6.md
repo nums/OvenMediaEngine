@@ -1,6 +1,8 @@
-# IPv6
-
-
+---
+title: IPv6
+description: "Configure OvenMediaEngine to listen on IPv6, including the multiple IP bindings supported from v0.15.1."
+sidebar_position: 9
+---
 
 Starting from version OME v0.15.1, IPv6 is supported.
 
@@ -20,11 +22,15 @@ You can use `/<Server>/<IP>` to support IPv6. In versions prior to v0.15.0, only
 </Server>
 ```
 
-{% hint style="info" %}
+
+:::info
+
 `*` means `0.0.0.0`(`INADDR_ANY`) in IPv4, and `::` means `::0`(`in6addr_any`) in IPv6.
 
 Of course, you can also specify a specific IP address of an interface instead of `::`.
-{% endhint %}
+
+:::
+
 
 ### Example 1) IPv4 Only
 
@@ -134,17 +140,25 @@ To use IPv6 ICE Candidate, you need to add an IPv6 `<IceCandidate>` to `/<Server
 </Server>
 ```
 
-{% hint style="info" %}
-To support IPv6 in URL format settings, use `[::]` instead of `::`
-{% endhint %}
 
-{% hint style="info" %}
+:::info
+
+To support IPv6 in URL format settings, use `[::]` instead of `::`
+
+:::
+
+
+
+:::info
+
 The `<IceCandidate>` settings for Providers and Publishers are the same.
-{% endhint %}
+
+:::
+
 
 By setting up as above, OME is ready to use ICE Candidates for IPv6 as well as IPv4. The ICE Candidate generated here can be viewed in the signaling step of the web browser.
 
-<figure><img src="../.gitbook/assets/image (3) (1) (1) (1).png" alt=""><figcaption></figcaption></figure>
+![](../images/ipv6-config-example.png)
 
 ## 3. Configuration for \<Origin>
 

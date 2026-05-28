@@ -66,6 +66,7 @@ namespace info
 		_from_origin_map_store = stream._from_origin_map_store;
 
 		_playlists = stream._playlists;
+		_track_sets = stream._track_sets;
 		_representation_type = stream._representation_type;
 
 		_origin_stream_uuid = stream._origin_stream_uuid;
@@ -249,12 +250,6 @@ namespace info
 		}
 
 		return GetPublishedTime();
-	}
-
-	uint32_t Stream::GetUptimeSec()
-	{
-		auto current = std::chrono::high_resolution_clock::now();
-		return std::chrono::duration_cast<std::chrono::seconds>(current - GetCreatedTime()).count();
 	}
 
 	StreamSourceType Stream::GetSourceType() const
@@ -542,6 +537,28 @@ namespace info
 	const std::map<ov::String, std::shared_ptr<const Playlist>> &Stream::GetPlaylists() const
 	{
 		return _playlists;
+	}
+
+	bool Stream::AddTrackSet(const std::shared_ptr<const TrackSet> &track_set)
+	{
+		auto result = _track_sets.emplace(track_set->GetName(), track_set);
+		return result.second;
+	}
+
+	std::shared_ptr<const TrackSet> Stream::GetTrackSet(const ov::String &name) const
+	{
+		auto item = _track_sets.find(name);
+		if (item == _track_sets.end())
+		{
+			return nullptr;
+		}
+
+		return item->second;
+	}
+
+	const std::map<ov::String, std::shared_ptr<const TrackSet>> &Stream::GetTrackSets() const
+	{
+		return _track_sets;
 	}
 
 	void Stream::SetApplicationInfo(const std::shared_ptr<Application> &app_info)

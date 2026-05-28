@@ -1,4 +1,8 @@
-# STT Control
+---
+title: STT Control
+description: "Control real-time speech-to-text subtitle generation for an OvenMediaEngine stream through the v1 REST API."
+sidebar_position: 51
+---
 
 These APIs pause and resume real-time Speech-to-Text (STT) inference for a specific stream at runtime, without restarting the server or recreating the stream.
 
@@ -12,7 +16,7 @@ Resumes STT inference for the stream. Audio frames are passed to the Whisper mod
 
 <details>
 
-<summary><mark style="color:blue;">POST</mark> v1/vhosts/{vhost}/apps/{app}/streams/{stream}:enableStt</summary>
+<summary><span class="http-method http-method-post">POST</span> v1/vhosts/&#x7B;vhost&#x7D;/apps/&#x7B;app&#x7D;/streams/&#x7B;stream&#x7D;:enableStt</summary>
 
 #### Header
 
@@ -35,7 +39,7 @@ Authorization: Basic {credentials}
 
 <details>
 
-<summary><mark style="color:blue;">200</mark> Ok</summary>
+<summary><span class="http-method http-method-200">200</span> Ok</summary>
 
 The request has succeeded
 
@@ -68,7 +72,7 @@ Content-Type: application/json
 
 <details>
 
-<summary><mark style="color:red;">401</mark> Unauthorized</summary>
+<summary><span class="http-method http-method-401">401</span> Unauthorized</summary>
 
 Authentication required
 
@@ -91,7 +95,7 @@ WWW-Authenticate: Basic realm="OvenMediaEngine"
 
 <details>
 
-<summary><mark style="color:red;">404</mark> Not Found</summary>
+<summary><span class="http-method http-method-404">404</span> Not Found</summary>
 
 The given vhost, app, or stream name could not be found, or no STT encoder exists for this stream.
 
@@ -108,7 +112,7 @@ The given vhost, app, or stream name could not be found, or no STT encoder exist
 
 <details>
 
-<summary><mark style="color:red;">503</mark> Service Unavailable</summary>
+<summary><span class="http-method http-method-503">503</span> Service Unavailable</summary>
 
 The Transcoder module is not running.
 
@@ -122,7 +126,7 @@ Pauses STT inference. Audio frames are dropped without processing, and subtitle 
 
 <details>
 
-<summary><mark style="color:blue;">POST</mark> v1/vhosts/{vhost}/apps/{app}/streams/{stream}:disableStt</summary>
+<summary><span class="http-method http-method-post">POST</span> v1/vhosts/&#x7B;vhost&#x7D;/apps/&#x7B;app&#x7D;/streams/&#x7B;stream&#x7D;:disableStt</summary>
 
 #### Header
 
@@ -145,7 +149,7 @@ Authorization: Basic {credentials}
 
 <details>
 
-<summary><mark style="color:blue;">200</mark> Ok</summary>
+<summary><span class="http-method http-method-200">200</span> Ok</summary>
 
 The request has succeeded
 
@@ -178,7 +182,7 @@ Content-Type: application/json
 
 <details>
 
-<summary><mark style="color:red;">401</mark> Unauthorized</summary>
+<summary><span class="http-method http-method-401">401</span> Unauthorized</summary>
 
 Authentication required
 
@@ -201,7 +205,7 @@ WWW-Authenticate: Basic realm="OvenMediaEngine"
 
 <details>
 
-<summary><mark style="color:red;">404</mark> Not Found</summary>
+<summary><span class="http-method http-method-404">404</span> Not Found</summary>
 
 The given vhost, app, or stream name could not be found, or no STT encoder exists for this stream.
 
@@ -218,7 +222,7 @@ The given vhost, app, or stream name could not be found, or no STT encoder exist
 
 <details>
 
-<summary><mark style="color:red;">503</mark> Service Unavailable</summary>
+<summary><span class="http-method http-method-503">503</span> Service Unavailable</summary>
 
 The Transcoder module is not running.
 
@@ -232,7 +236,7 @@ Returns the current enabled state and configuration of all active STT renditions
 
 <details>
 
-<summary><mark style="color:blue;">POST</mark> v1/vhosts/{vhost}/apps/{app}/streams/{stream}:sttStatus</summary>
+<summary><span class="http-method http-method-post">POST</span> v1/vhosts/&#x7B;vhost&#x7D;/apps/&#x7B;app&#x7D;/streams/&#x7B;stream&#x7D;:sttStatus</summary>
 
 #### Header
 
@@ -255,7 +259,7 @@ Authorization: Basic {credentials}
 
 <details>
 
-<summary><mark style="color:blue;">200</mark> Ok</summary>
+<summary><span class="http-method http-method-200">200</span> Ok</summary>
 
 The request has succeeded
 
@@ -316,7 +320,7 @@ Content-Type: application/json
 
 <details>
 
-<summary><mark style="color:red;">401</mark> Unauthorized</summary>
+<summary><span class="http-method http-method-401">401</span> Unauthorized</summary>
 
 Authentication required
 
@@ -339,7 +343,7 @@ WWW-Authenticate: Basic realm="OvenMediaEngine"
 
 <details>
 
-<summary><mark style="color:red;">503</mark> Service Unavailable</summary>
+<summary><span class="http-method http-method-503">503</span> Service Unavailable</summary>
 
 The Transcoder module is not running.
 

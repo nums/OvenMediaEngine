@@ -1,4 +1,8 @@
-# Configuration
+---
+title: Configuration
+description: "Configure OvenMediaEngine through Server.xml — origin and edge modes, binds, virtual hosts, and applications."
+sidebar_position: 7
+---
 
 OvenMediaEngine has an XML configuration file. If you start OvenMediaEngine with `systemctl start ovenmediaengine`, the config file is loaded from the following path.
 
@@ -69,7 +73,7 @@ If OvenMediaEngine obtains the public IP through communication with the set stun
 
 The `<Bind>` is the configuration for the server port that will be used. Bind consists of `<Providers>` and `<Publishers>`. The Providers are the server for stream input, and the Publishers are the server for streaming.
 
-{% code overflow="wrap" %}
+
 ```xml
 <Server>
     <!-- Settings for the ports to bind -->
@@ -116,15 +120,15 @@ The `<Bind>` is the configuration for the server port that will be used. Bind co
                 </Signalling>
 
                 <IceCandidates>
-                    <IceCandidate>*:10000/udp</IceCandidate>
-                    <!-- 
-                        If you want to stream WebRTC over TCP, specify IP:Port for TURN server.
-                        This uses the TURN protocol, which delivers the stream from the built-in TURN server to the player's TURN client over TCP. 
-                        For detailed information, refer https://airensoft.gitbook.io/ovenmediaengine/streaming/webrtc-publishing#webrtc-over-tcp
-                    -->
-                    <TcpRelay>*:3478</TcpRelay>
-                    <!-- TcpForce is an option to force the use of TCP rather than UDP in WebRTC streaming. (You can omit ?transport=tcp accordingly.) If <TcpRelay> is not set, playback may fail. -->
-                    <TcpForce>true</TcpForce>
+                    <!-- ${PublicIP} is resolved via <StunServer>. Falls back to all local IPs if STUN fails. -->
+                    <IceCandidate>${PublicIP}:10000/udp</IceCandidate>
+                    <!-- Direct TCP ICE (RFC 6544) -->
+                    <IceCandidate>${PublicIP}:10000/tcp</IceCandidate>
+                    <!-- TURN relay for clients that do not support Direct TCP ICE -->
+                    <TcpRelay>${PublicIP}:3478</TcpRelay>
+                    <TcpRelayForce>false</TcpRelayForce>
+                    <IceWorkerCount>1</IceWorkerCount>
+                    <TcpIceWorkerCount>1</TcpIceWorkerCount>
                     <TcpRelayWorkerCount>1</TcpRelayWorkerCount>
                 </IceCandidates>
             </WebRTC>
@@ -153,15 +157,15 @@ The `<Bind>` is the configuration for the server port that will be used. Bind co
                     <WorkerCount>1</WorkerCount>
                 </Signalling>
                 <IceCandidates>
-                    <IceCandidate>*:10000-10005/udp</IceCandidate>
-                    <!-- 
-                        If you want to stream WebRTC over TCP, specify IP:Port for TURN server.
-                        This uses the TURN protocol, which delivers the stream from the built-in TURN server to the player's TURN client over TCP. 
-                        For detailed information, refer https://airensoft.gitbook.io/ovenmediaengine/streaming/webrtc-publishing#webrtc-over-tcp
-                    -->
-                    <TcpRelay>*:3478</TcpRelay>
-                    <!-- TcpForce is an option to force the use of TCP rather than UDP in WebRTC streaming. (You can omit ?transport=tcp accordingly.) If <TcpRelay> is not set, playback may fail. -->
-                    <TcpForce>true</TcpForce>
+                    <!-- ${PublicIP} is resolved via <StunServer>. Falls back to all local IPs if STUN fails. -->
+                    <IceCandidate>${PublicIP}:10000/udp</IceCandidate>
+                    <!-- Direct TCP ICE (RFC 6544) -->
+                    <IceCandidate>${PublicIP}:10000/tcp</IceCandidate>
+                    <!-- TURN relay for clients that do not support Direct TCP ICE -->
+                    <TcpRelay>${PublicIP}:3478</TcpRelay>
+                    <TcpRelayForce>false</TcpRelayForce>
+                    <IceWorkerCount>1</IceWorkerCount>
+                    <TcpIceWorkerCount>1</TcpIceWorkerCount>
                     <TcpRelayWorkerCount>1</TcpRelayWorkerCount>
                 </IceCandidates>
             </WebRTC>
@@ -170,7 +174,7 @@ The `<Bind>` is the configuration for the server port that will be used. Bind co
 </Server>
 
 ```
-{% endcode %}
+
 
 The meaning of each element is shown in the following table:
 
@@ -226,9 +230,9 @@ The Domain has `<Names>` and `<TLS>`. `<Names>` can be either a domain or an IP 
             <!--
                 You can specify domain names/IP addresses
 
-                <Name>stream1.airensoft.com</Name>
-                <Name>stream2.airensoft.com</Name>
-                <Name>*.sub.airensoft.com</Name>
+                <Name>stream1.ovenmedialabs.com</Name>
+                <Name>stream2.ovenmedialabs.com</Name>
+                <Name>*.sub.ovenmedialabs.com</Name>
                 <Name>192.168.0.160</Name>
             -->
             <Name>*</Name>
@@ -252,7 +256,7 @@ Origins (also we called `OriginMap`) are a feature to pull streams from external
 
 The Origin has `<Location>` and `<Pass>` elements. Location is a URI pattern for incoming requests. If the incoming URL request matches Location, OvenMediaEngine pulls the stream according to a Pass element. In the Pass element, you can set the origin stream's protocol and URLs.
 
-To run the Edge server, Origin creates application and stream if there isn't those when user request. For more learn about Origin-Edge, see the [Live Source](../live-source/) chapter.
+When an Edge server receives a request for an application or stream that does not exist, the Origin creates them on demand. To learn more about Origin-Edge, see the [Live Source](../live-source/README.md) chapter.
 
 ```xml
 <!-- /Server/VirtualHosts -->
@@ -363,7 +367,7 @@ To run the Edge server, Origin creates application and stream if there isn't tho
 </Application>
 ```
 
-For more information about the `<OutputProfiles>`, please see the [Transcoding](../transcoding/) chapter.
+For more information about the `<OutputProfiles>`, please see the [Transcoding](../transcoding/README.md) chapter.
 
 #### Providers
 
@@ -387,15 +391,19 @@ For more information about the `<OutputProfiles>`, please see the [Transcoding](
 </Application>
 ```
 
-If you want to get more information about the `<Providers>`, please refer to the [Live Source](../live-source/) chapter.
+If you want to get more information about the `<Providers>`, please refer to the [Live Source](../live-source/README.md) chapter.
 
 #### Publishers
 
 You can configure the Output Stream operation in `<Publishers>``/<ThreadCount>` is the number of threads used by each component responsible for the `<Publishers>` protocol.
 
-{% hint style="info" %}
+
+:::info
+
 You need many threads to transmit streams to a large number of users at the same time. So it's better to use a higher core CPU and set `<ThreadCount>` equal to the number of CPU cores.
-{% endhint %}
+
+:::
+
 
 ```xml
 <!-- /Server/VirtualHosts/VirtualHost/Applications -->
@@ -410,7 +418,7 @@ You need many threads to transmit streams to a large number of users at the same
 
 ​OvenMediaEngine currently supports WebRTC, Low-Latency DASH, MEPG-DASH, and HLS. If you don't want to use any protocol then you can delete that protocol setting, the component for that protocol isn't initialized. As a result, you can save system resources by deleting the settings of unused protocol components.
 
-If you want to learn more about WebRTC, visit the [WebRTC Streaming](../streaming/webrtc-publishing.md) chapter. And if you want to get more information on Low-Latency DASH, MPEG-DASH, and HLS, refer to the chapter on [HLS & MPEG-DASH Streaming](broken-reference).
+If you want to learn more about WebRTC, visit the [WebRTC Streaming](../streaming/webrtc-publishing.md) chapter. And if you want to get more information on Low-Latency DASH, MPEG-DASH, and HLS, refer to the chapter on [HLS & MPEG-DASH Streaming](../streaming/low-latency-hls.md).
 
 ## Configuration Example
 
@@ -499,18 +507,15 @@ Finally, `Server.xml` is configured as follows:
                 </Signalling>
 
                 <IceCandidates>
-                    <IceCandidate>*:10000/udp</IceCandidate>
-                    <!--
-                        If you want to stream WebRTC over TCP, specify IP:Port for TURN server.
-                        This uses the TURN protocol, which delivers the stream from the built-in TURN server to the player's TURN client over TCP.
-                        For detailed information, refer https://airensoft.gitbook.io/ovenmediaengine/streaming/webrtc-publishing#webrtc-over-tcp
-                    -->
-                    <TcpRelay>*:3478</TcpRelay>
-                    <!--
-                        TcpForce is an option to force the use of TCP rather than UDP in WebRTC streaming.
-                        (You can omit ?transport=tcp accordingly.) If <TcpRelay> is not set, playback may fail.
-                    -->
-                    <TcpForce>true</TcpForce>
+                    <!-- ${PublicIP} is resolved via <StunServer>. Falls back to all local IPs if STUN fails. -->
+                    <IceCandidate>${PublicIP}:10000/udp</IceCandidate>
+                    <!-- Direct TCP ICE (RFC 6544) -->
+                    <IceCandidate>${PublicIP}:10000/tcp</IceCandidate>
+                    <!-- TURN relay for clients that do not support Direct TCP ICE -->
+                    <TcpRelay>${PublicIP}:3478</TcpRelay>
+                    <TcpRelayForce>false</TcpRelayForce>
+                    <IceWorkerCount>1</IceWorkerCount>
+                    <TcpIceWorkerCount>1</TcpIceWorkerCount>
                     <TcpRelayWorkerCount>1</TcpRelayWorkerCount>
                 </IceCandidates>
             </WebRTC>
@@ -539,18 +544,15 @@ Finally, `Server.xml` is configured as follows:
                     <WorkerCount>1</WorkerCount>
                 </Signalling>
                 <IceCandidates>
-                    <IceCandidate>*:10000-10005/udp</IceCandidate>
-                    <!--
-                        If you want to stream WebRTC over TCP, specify IP:Port for TURN server.
-                        This uses the TURN protocol, which delivers the stream from the built-in TURN server to the player's TURN client over TCP.
-                        For detailed information, refer https://airensoft.gitbook.io/ovenmediaengine/streaming/webrtc-publishing#webrtc-over-tcp
-                    -->
-                    <TcpRelay>*:3478</TcpRelay>
-                    <!--
-                        TcpForce is an option to force the use of TCP rather than UDP in WebRTC streaming.
-                        (You can omit ?transport=tcp accordingly.) If <TcpRelay> is not set, playback may fail.
-                    -->
-                    <TcpForce>true</TcpForce>
+                    <!-- ${PublicIP} is resolved via <StunServer>. Falls back to all local IPs if STUN fails. -->
+                    <IceCandidate>${PublicIP}:10000/udp</IceCandidate>
+                    <!-- Direct TCP ICE (RFC 6544) -->
+                    <IceCandidate>${PublicIP}:10000/tcp</IceCandidate>
+                    <!-- TURN relay for clients that do not support Direct TCP ICE -->
+                    <TcpRelay>${PublicIP}:3478</TcpRelay>
+                    <TcpRelayForce>false</TcpRelayForce>
+                    <IceWorkerCount>1</IceWorkerCount>
+                    <TcpIceWorkerCount>1</TcpIceWorkerCount>
                     <TcpRelayWorkerCount>1</TcpRelayWorkerCount>
                 </IceCandidates>
             </WebRTC>
@@ -579,9 +581,9 @@ Finally, `Server.xml` is configured as follows:
             <AccessToken>ome-access-token</AccessToken>
 
             <CrossDomains>
-                <Url>*.airensoft.com</Url>
-                <Url>http://*.sub-domain.airensoft.com</Url>
-                <Url>http?://airensoft.*</Url>
+                <Url>*.ovenmedialabs.com</Url>
+                <Url>http://*.sub-domain.ovenmedialabs.com</Url>
+                <Url>http?://ovenmedialabs.*</Url>
             </CrossDomains>
         </API>
     </Managers>
@@ -602,9 +604,9 @@ Finally, `Server.xml` is configured as follows:
             <Host>
                 <Names>
                     <!-- Host names
-                        <Name>stream1.airensoft.com</Name>
-                        <Name>stream2.airensoft.com</Name>
-                        <Name>*.sub.airensoft.com</Name>
+                        <Name>stream1.ovenmedialabs.com</Name>
+                        <Name>stream2.ovenmedialabs.com</Name>
+                        <Name>*.sub.ovenmedialabs.com</Name>
                         <Name>192.168.0.1</Name>
                     -->
                     <Name>*</Name>
@@ -619,7 +621,7 @@ Finally, `Server.xml` is configured as follows:
             </Host>
 
             <!--
-                Refer to https://airensoft.gitbook.io/ovenmediaengine/signedpolicy
+                Refer to ../access-control/signedpolicy.md
             -->
             <!--
             <SignedPolicy>

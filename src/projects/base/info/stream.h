@@ -5,6 +5,7 @@
 #include "base/common_types.h"
 #include "base/info/media_track_group.h"
 #include "base/info/playlist.h"
+#include "base/info/track_set.h"
 #include "vhost_app_name.h"
 
 namespace info
@@ -66,7 +67,6 @@ namespace info
 		const std::chrono::system_clock::time_point &GetInputStreamPublishedTime() const;
 		const std::chrono::system_clock::time_point &GetPublishedTime() const;
 
-		uint32_t GetUptimeSec();
 		StreamSourceType GetSourceType() const;
 		ProviderType GetProviderType() const;
 		
@@ -104,6 +104,10 @@ namespace info
 		bool AddPlaylist(const std::shared_ptr<const Playlist> &playlist);
 		std::shared_ptr<const Playlist> GetPlaylist(const ov::String &file_name) const;
 		const std::map<ov::String, std::shared_ptr<const Playlist>> &GetPlaylists() const;
+
+		bool AddTrackSet(const std::shared_ptr<const TrackSet> &track_set);
+		std::shared_ptr<const TrackSet> GetTrackSet(const ov::String &name) const;
+		const std::map<ov::String, std::shared_ptr<const TrackSet>> &GetTrackSets() const;
 
 		ov::String GetInfoString();
 		void ShowInfo();
@@ -183,6 +187,9 @@ namespace info
 
 		// File name : Playlist
 		std::map<ov::String, std::shared_ptr<const Playlist>> _playlists;
+
+		// Name : TrackSet
+		std::map<ov::String, std::shared_ptr<const TrackSet>> _track_sets;
 
 		bool _from_origin_map_store = false;
 

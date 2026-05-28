@@ -31,6 +31,7 @@ NETINT_LOGAN_XCODER_COMPILE_PATH=""
 NVIDIA_NV_HWACCELS=false
 XILINX_XMA_CODEC_HWACCELS=false
 VIDEOLAN_X264_CODEC=true
+OME_WHISPER_STATIC=false
 
 if [[ "$OSTYPE" == "darwin"* ]]; then
     NCPU=$(sysctl -n hw.ncpu)
@@ -222,8 +223,7 @@ install_nvcc_hdr() {
         mkdir -p ${DIR} && \
         cd ${DIR} && \
         curl -sSLf https://github.com/FFmpeg/nv-codec-headers/releases/download/n${NVCC_HDR_VERSION}/nv-codec-headers-${NVCC_HDR_VERSION}.tar.gz | tar -xz --strip-components=1 && \
-        sed -i 's|PREFIX.*=\(.*\)|PREFIX = '${PREFIX}'|g' Makefile && \
-        sudo make install ) || fail_exit "nvcc_headers"
+        sudo make PREFIX="${PREFIX}" LIBDIR=lib install ) || fail_exit "nvcc_headers"
     fi
 }
 
@@ -369,8 +369,8 @@ install_ffmpeg()
     --enable-shared --enable-zlib --enable-libopus --enable-libvpx --enable-libfdk_aac --enable-libopenh264 --enable-openssl --enable-network --enable-libsrt --enable-dct --enable-rdft --enable-libwebp ${ADDI_LIBS} \
     ${ADDI_HWACCEL} \
     --enable-encoder=libvpx_vp8,libopus,libfdk_aac,libopenh264,mjpeg,png,libwebp${ADDI_ENCODER} \
-    --enable-decoder=aac,aac_latm,aac_fixed,mp3float,mp3,h264,hevc,opus,vp8,mjpeg,png${ADDI_DECODER} \
-    --enable-parser=aac,aac_latm,aac_fixed,h264,hevc,opus,vp8,png,jpg \
+    --enable-decoder=aac,aac_latm,aac_fixed,mp2,mp2float,mp3float,mp3,h264,hevc,opus,vp8,mjpeg,png${ADDI_DECODER} \
+    --enable-parser=aac,aac_latm,aac_fixed,h264,hevc,mpegaudio,opus,vp8,png,jpg \
     --enable-protocol=tcp,udp,rtp,file,rtmp,tls,rtmps,libsrt \
     --enable-demuxer=rtsp,flv,live_flv,mp4,mp3,image2 \
     --enable-muxer=mp4,webm,mpegts,flv,mpjpeg \
@@ -423,8 +423,8 @@ install_hiredis()
     mkdir -p ${DIR} && \
     cd ${DIR} && \
     curl -sSLf https://github.com/redis/hiredis/archive/refs/tags/v${HIREDIS_VERSION}.tar.gz | tar -xz --strip-components=1 && \
-    make -j$(nproc) && \
-    sudo make install PREFIX="${PREFIX}" && \
+    make -j$(nproc) PREFIX=${PREFIX} LIBRARY_PATH=lib && \
+    sudo make install PREFIX="${PREFIX}" LIBRARY_PATH=lib && \
     rm -rf ${DIR} ) || fail_exit "hiredis"
 }
 
@@ -446,15 +446,18 @@ install_spdlog()
 
 install_whisper()
 {
-	WHISPER_CUDA=0
+	WHISPER_CUDA="OFF"
 	if [ "$NVIDIA_NV_HWACCELS" = true ] ; then
-			WHISPER_CUDA=1
+			WHISPER_CUDA="ON"
 	fi
 
-	# 61: Pascal - GeForce GTX 10 series (e.g., GTX 1060, 1080)
-			## NOTE: Legacy. Dropped in CUDA 12.0 and later. Requires CUDA 11.x or older to build.
-	# 70: Volta - Titan V, Tesla V100
-			## NOTE: Legacy. Dropped in CUDA 12.0 and later. Requires CUDA 11.x or older to build.
+    _BUILD_SHARED_LIBS="ON"
+    _GGML_STATIC="OFF"
+    if [ "$OME_WHISPER_STATIC" = true ] ; then
+        _BUILD_SHARED_LIBS="OFF"
+        _GGML_STATIC="ON"
+    fi
+
 	# 61: Pascal      - GeForce GTX 10 series (1050/1060/1070/1080)
 	# 70: Volta       - Tesla V100
 	# 75: Turing      - GeForce RTX 20 series & GTX 16 series, Tesla T4
@@ -462,7 +465,7 @@ install_whisper()
 	# 86: Ampere      - GeForce RTX 30 series (Desktop/Laptop), Tesla A10
 	# 89: Ada Lovelace - GeForce RTX 40 series, Tesla L4
 	# 90: Hopper      - H100
-	WHISPER_CUDA_ARCH="61;70;75;80;86;89;90"
+	WHISPER_CUDA_ARCH="61-real;70-real;75-real;80-real;86-real;89"
 
 	(DIR=${TEMP_PATH}/whisper && \
 	mkdir -p ${DIR} && \
@@ -472,11 +475,14 @@ install_whisper()
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_INSTALL_PREFIX=${PREFIX} \
 		-DCMAKE_INSTALL_RPATH=${PREFIX}/lib \
-		-DBUILD_SHARED_LIBS=ON \
+		-DBUILD_SHARED_LIBS=${_BUILD_SHARED_LIBS} \
 		-DWHISPER_BUILD_EXAMPLES=OFF \
 		-DWHISPER_BUILD_TESTS=OFF \
 		-DWHISPER_BUILD_SERVER=OFF \
 		-DGGML_CUDA=${WHISPER_CUDA} \
+		-DGGML_STATIC=${_GGML_STATIC} \
+		-DGGML_CUDA_FA_ALL_QUANTS=OFF \
+		-DGGML_CUDA_GRAPHS=OFF \
 		-DCMAKE_CUDA_ARCHITECTURES=${WHISPER_CUDA_ARCH} && \
 	cd build && \
 	make -j$(nproc) && \
@@ -545,7 +551,7 @@ install_ovenmediaengine()
     (DIR=${TEMP_PATH}/ome && \
     mkdir -p ${DIR} && \
     cd ${DIR} && \
-    curl -sSLf https://github.com/AirenSoft/OvenMediaEngine/archive/${OME_VERSION}.tar.gz | tar -xz --strip-components=1 && \
+    curl -sSLf https://github.com/OvenMediaLabs/OvenMediaEngine/archive/${OME_VERSION}.tar.gz | tar -xz --strip-components=1 && \
     cd src && \
     make release && \
     sudo make install && \
@@ -640,6 +646,10 @@ case $i in
     ;;
     --enable-x264)
     VIDEOLAN_X264_CODEC=true
+    shift
+    ;;
+    --whisper-static)
+    OME_WHISPER_STATIC=true
     shift
     ;;
     *)

@@ -17,7 +17,9 @@
 #   -DOME_NILOGAN_PATCH_PATH=<path>        Path to NiLogan FFmpeg patch file (required with OME_HWACCEL_NILOGAN)
 #   -DOME_NILOGAN_XCODER_COMPILE_PATH=<path>  Path to xcoder_logan source to compile (optional)
 #   -DOME_ENABLE_X264=ON                   Enable libx264 (default ON)
+#   -DOME_ENABLE_JEMALLOC_LG_PAGE_MAX=ON   Build jemalloc with --with-lg-page=16 on aarch64/arm64
 #   -DOME_USE_CLANG=ON                     Install clang/lld and use as compiler (default ON)
+#   -DOME_WHISPER_STATIC=ON                Build Whisper as a static library (default OFF)
 #   -DTARGET=<name>                        Install only this target
 #
 # Example:
@@ -74,6 +76,12 @@ if(NOT DEFINED OME_USE_CLANG)
 endif()
 if(NOT DEFINED ENABLE_JEMALLOC_PROF)
     set(ENABLE_JEMALLOC_PROF OFF)
+endif()
+if(NOT DEFINED OME_ENABLE_JEMALLOC_LG_PAGE_MAX)
+    set(OME_ENABLE_JEMALLOC_LG_PAGE_MAX OFF)
+endif()
+if(NOT DEFINED OME_TARGET_PROCESSOR)
+    set(OME_TARGET_PROCESSOR ${CMAKE_HOST_SYSTEM_PROCESSOR})
 endif()
 
 # Library versions - defined in a shared file so Dependencies.cmake can use the same values.
@@ -276,6 +284,106 @@ else()
 endif()
 
 # ==============================================================================
+# NVIDIA toolchain validation (fail-fast)
+#
+# Catches missing CUDA Toolkit before any time is spent building dependencies.
+# Mirrors the same check in cmake/Dependencies.cmake so that both entry points
+# (direct `cmake -P InstallPrerequisites.cmake` and the auto-reinstall path
+# triggered from the main configure) fail at the earliest possible moment.
+# ==============================================================================
+if(OME_HWACCEL_NVIDIA)
+    set(_CUDA_ROOT "/usr/local/cuda")
+    find_program(_OME_NVCC nvcc HINTS ${_CUDA_ROOT}/bin /usr/cuda/bin)
+    find_library(_OME_ML_LIB     nvidia-ml     HINTS ${_CUDA_ROOT}/lib64 ${_CUDA_ROOT}/lib64/stubs /usr/cuda/lib64 /usr/cuda/lib64/stubs /usr/lib/x86_64-linux-gnu)
+    find_library(_OME_CUDA_LIB   cuda          HINTS ${_CUDA_ROOT}/lib64 ${_CUDA_ROOT}/lib64/stubs /usr/cuda/lib64 /usr/cuda/lib64/stubs /usr/lib/x86_64-linux-gnu)
+    find_library(_OME_CUDART_LIB cudart_static HINTS ${_CUDA_ROOT}/lib64 /usr/cuda/lib64 /usr/lib/x86_64-linux-gnu)
+
+    if(NOT (_OME_NVCC AND _OME_CUDA_LIB AND _OME_CUDART_LIB AND _OME_ML_LIB))
+        message(FATAL_ERROR
+            "[OME Prerequisites] OME_HWACCEL_NVIDIA=ON but CUDA Toolkit is missing or incomplete:\n"
+            "  nvcc:             ${_OME_NVCC}\n"
+            "  libnvidia-ml:     ${_OME_ML_LIB}\n"
+            "  libcuda:          ${_OME_CUDA_LIB}\n"
+            "  libcudart_static: ${_OME_CUDART_LIB}\n"
+            "Install CUDA Toolkit: https://developer.nvidia.com/cuda-downloads\n"
+            "Or disable NVIDIA support: re-run without -DOME_HWACCEL_NVIDIA=ON"
+        )
+    endif()
+    message(STATUS "[OME Prerequisites] CUDA Toolkit found - nvcc: ${_OME_NVCC}")
+
+    # nvcc <-> host compiler compatibility probe with auto-fallback.
+    # nvcc enforces the host compiler version (e.g. CUDA 12.x rejects gcc 15+).
+    # If CMAKE_CUDA_HOST_COMPILER is preset (user-supplied or forwarded from the
+    # parent configure) only that is probed. Otherwise try the system default,
+    # then walk g++-14 / g++-13 / g++-12 / g++-11 and pick the first one nvcc
+    # accepts. The selected compiler is exported via OME_NVCC_HOST_CXX so the
+    # whisper build inherits it as CMAKE_CUDA_HOST_COMPILER.
+    set(_OME_CUDA_TEST_DIR "${TEMP_PATH}/cuda_compat_test")
+    file(REMOVE_RECURSE "${_OME_CUDA_TEST_DIR}")
+    file(MAKE_DIRECTORY "${_OME_CUDA_TEST_DIR}")
+    file(WRITE "${_OME_CUDA_TEST_DIR}/test.cu" "#include <cuda_runtime.h>\nint main(){return 0;}\n")
+
+    if(CMAKE_CUDA_HOST_COMPILER)
+        set(_OME_HOST_CANDIDATES "${CMAKE_CUDA_HOST_COMPILER}")
+    else()
+        # Empty string means "system default" (no -ccbin passed to nvcc).
+        set(_OME_HOST_CANDIDATES "" g++-14 g++-13 g++-12 g++-11)
+    endif()
+
+    set(OME_NVCC_HOST_CXX "")
+    set(_OME_HOST_PICKED "NOTFOUND")
+    set(_OME_CUDA_TEST_ERR "")
+    foreach(_cxx IN LISTS _OME_HOST_CANDIDATES)
+        set(_cxx_args "")
+        if(NOT "${_cxx}" STREQUAL "")
+            unset(_OME_FOUND_CXX CACHE)
+            find_program(_OME_FOUND_CXX NAMES "${_cxx}")
+            if(NOT _OME_FOUND_CXX)
+                continue()
+            endif()
+            set(_cxx_args "-ccbin" "${_OME_FOUND_CXX}")
+        endif()
+        execute_process(
+            COMMAND ${_OME_NVCC} ${_cxx_args} -c "${_OME_CUDA_TEST_DIR}/test.cu" -o "${_OME_CUDA_TEST_DIR}/test.o"
+            RESULT_VARIABLE _OME_CUDA_TEST_RET
+            ERROR_VARIABLE _OME_CUDA_TEST_ERR
+            OUTPUT_QUIET
+        )
+        if(_OME_CUDA_TEST_RET EQUAL 0)
+            if("${_cxx}" STREQUAL "")
+                set(_OME_HOST_PICKED "default")
+            else()
+                set(_OME_HOST_PICKED "${_OME_FOUND_CXX}")
+                set(OME_NVCC_HOST_CXX "${_OME_FOUND_CXX}")
+            endif()
+            break()
+        endif()
+    endforeach()
+    unset(_OME_FOUND_CXX CACHE)
+    file(REMOVE_RECURSE "${_OME_CUDA_TEST_DIR}")
+
+    if(_OME_HOST_PICKED STREQUAL "NOTFOUND")
+        execute_process(COMMAND ${_OME_NVCC} --version
+            OUTPUT_VARIABLE _OME_NVCC_VER OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        execute_process(COMMAND g++ --version
+            OUTPUT_VARIABLE _OME_HOST_VER OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        message(FATAL_ERROR
+            "[OME Prerequisites] nvcc could not compile a trivial CUDA file with any C++ host compiler tried (default + g++-14/13/12/11).\n\n"
+            "Last nvcc error:\n${_OME_CUDA_TEST_ERR}\n"
+            "nvcc:\n${_OME_NVCC_VER}\n\n"
+            "system g++:\n${_OME_HOST_VER}\n\n"
+            "Most often this is a C++ host compiler incompatibility (each CUDA toolkit only supports up to a specific g++ version). Less commonly the same failure surfaces from a partially installed CUDA Toolkit (missing headers or libraries). Inspect the nvcc error above to tell which case applies.\n\n"
+            "If it is a host compiler issue, install a supported g++, for example:\n"
+            "  sudo apt install -y gcc-14 g++-14"
+        )
+    elseif("${_OME_HOST_PICKED}" STREQUAL "default")
+        message(STATUS "[OME Prerequisites] nvcc host compiler: system default works")
+    else()
+        message(STATUS "[OME Prerequisites] nvcc host compiler: auto-selected ${_OME_HOST_PICKED}")
+    endif()
+endif()
+
+# ==============================================================================
 # Individual install functions (implemented as cmake variables holding shell code)
 # ==============================================================================
 
@@ -312,7 +420,7 @@ mkdir -p ${TEMP_PATH}/srt && cd ${TEMP_PATH}/srt &&
 curl -sSLf ${SRT_SOURCE_URL} | tar -xz --strip-components=1 &&
 cmake -S . -B build -DCMAKE_INSTALL_PREFIX=${PREFIX} -DENABLE_SHARED=1 -DENABLE_STATIC=0 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 &&
 cmake --build build ${_J} &&
-sudo cmake --install build && rm -rf ${TEMP_PATH}/srt
+sudo cmake --install build --prefix ${PREFIX} && rm -rf ${TEMP_PATH}/srt
 ")
 
 # ---- Opus ----
@@ -364,10 +472,10 @@ make ${_J} && sudo make install && rm -rf ${TEMP_PATH}/x264
 ")
 
 # ---- nv-codec-headers (optional) ----
-set(_install_nvcc_hdr "
+set(_install_ffnvcodec "
 mkdir -p ${TEMP_PATH}/nvcc-hdr && cd ${TEMP_PATH}/nvcc-hdr &&
 curl -sSLf ${NVCC_HDR_SOURCE_URL} | tar -xz --strip-components=1 &&
-sed -i 's|PREFIX.*=\\(.*\\)|PREFIX = ${PREFIX}|g' Makefile && sudo make install
+sudo make PREFIX=${PREFIX} LIBDIR=lib install
 ")
 
 # ---- FFmpeg ----
@@ -457,8 +565,8 @@ set(_FFMPEG_CONFIGURE_CMD
     "${_FFMPEG_ADDI_LICENSE}"
     "${_FFMPEG_ADDI_LIBS}"
     "--enable-encoder=libvpx_vp8,libopus,libfdk_aac,libopenh264,mjpeg,png,libwebp${_FFMPEG_ADDI_ENCODER}"
-    "--enable-decoder=aac,aac_latm,aac_fixed,mp3float,mp3,h264,hevc,opus,vp8,mjpeg,png${_FFMPEG_ADDI_DECODER}"
-    "--enable-parser=aac,aac_latm,aac_fixed,h264,hevc,opus,vp8,png,jpg"
+    "--enable-decoder=aac,aac_latm,aac_fixed,mp2,mp2float,mp3float,mp3,h264,hevc,opus,vp8,mjpeg,png${_FFMPEG_ADDI_DECODER}"
+    "--enable-parser=aac,aac_latm,aac_fixed,h264,hevc,mpegaudio,opus,vp8,png,jpg"
     "--enable-protocol=tcp,udp,rtp,file,rtmp,tls,rtmps,libsrt"
     "--enable-demuxer=rtsp,flv,live_flv,mp4,mp3,image2"
     "--enable-muxer=mp4,webm,mpegts,flv,mpjpeg"
@@ -474,12 +582,12 @@ make ${_J} && sudo make install && sudo rm -rf ${PREFIX}/share && rm -rf ${TEMP_
 ")
 
 # ---- stubs ----
-# Built via CMake (misc/stubs/CMakeLists.txt) instead of the legacy Makefile.
-set(_STUB_DIR "${CMAKE_CURRENT_LIST_DIR}/..")
+set(_STUB_DIR "${CMAKE_CURRENT_LIST_DIR}/../misc/stubs")
 set(_install_stubs "
-cmake -S ${_STUB_DIR} -B ${_STUB_DIR}/build/stubs -DOME_BUILD_STUBS=ON -DCMAKE_INSTALL_PREFIX=${PREFIX} -DCMAKE_POLICY_VERSION_MINIMUM=3.5 &&
-cmake --build ${_STUB_DIR}/build/stubs --target stubs -j$(nproc) &&
-sudo cmake --install ${_STUB_DIR}/build/stubs --component stubs
+cmake -S ${_STUB_DIR} -B ${_STUB_DIR}/build -DCMAKE_INSTALL_PREFIX=${PREFIX} &&
+cmake --build ${_STUB_DIR}/build --target stubs -j$(nproc) &&
+sudo cmake --install ${_STUB_DIR}/build --component stubs && 
+rm -rf ${_STUB_DIR}/build
 ")
 
 # ---- jemalloc ----
@@ -488,10 +596,17 @@ if(ENABLE_JEMALLOC_PROF)
 else()
     set(_JEMALLOC_PROF_FLAG "")
 endif()
+string(TOLOWER "${OME_TARGET_PROCESSOR}" _OME_TARGET_PROCESSOR_LOWER)
+if(OME_ENABLE_JEMALLOC_LG_PAGE_MAX AND _OME_TARGET_PROCESSOR_LOWER MATCHES "^(aarch64|arm64)$")
+    set(_JEMALLOC_LG_PAGE_FLAG "--with-lg-page=16")
+else()
+    set(_JEMALLOC_LG_PAGE_FLAG "")
+endif()
+unset(_OME_TARGET_PROCESSOR_LOWER)
 set(_install_jemalloc "
 mkdir -p ${TEMP_PATH}/jemalloc && cd ${TEMP_PATH}/jemalloc &&
 curl -sSLf ${JEMALLOC_SOURCE_URL} | tar -jx --strip-components=1 &&
-./configure --prefix=${PREFIX} --enable-shared ${_JEMALLOC_PROF_FLAG} &&
+./configure --prefix=${PREFIX} --enable-shared ${_JEMALLOC_PROF_FLAG} ${_JEMALLOC_LG_PAGE_FLAG} &&
 make ${_J} && sudo make install && rm -rf ${TEMP_PATH}/jemalloc
 ")
 
@@ -507,7 +622,7 @@ make ${_J} && sudo make install && rm -rf ${TEMP_PATH}/pcre2
 set(_install_hiredis "
 mkdir -p ${TEMP_PATH}/hiredis && cd ${TEMP_PATH}/hiredis &&
 curl -sSLf ${HIREDIS_SOURCE_URL} | tar -xz --strip-components=1 &&
-make ${_J} PREFIX=${PREFIX} && sudo make install PREFIX=${PREFIX} && rm -rf ${TEMP_PATH}/hiredis
+make ${_J} PREFIX=${PREFIX} LIBRARY_PATH=lib && sudo make install PREFIX=${PREFIX} LIBRARY_PATH=lib && rm -rf ${TEMP_PATH}/hiredis
 ")
 
 # ---- spdlog ----
@@ -520,29 +635,38 @@ make ${_J} && sudo make install && rm -rf ${TEMP_PATH}/spdlog
 ")
 
 # ---- whisper.cpp ----
-set(_WHISPER_CUDA 0)
+set(_WHISPER_CUDA "OFF")
 if(ENABLE_NVIDIA)
-    set(_WHISPER_CUDA 1)
+    set(_WHISPER_CUDA "ON")
+endif()
+set(_BUILD_SHARED_LIBS "ON")
+set(_GGML_STATIC "OFF")
+if(OME_WHISPER_STATIC)
+    message(STATUS "[OME] Building Whisper/ggml as a static library")
+    set(_BUILD_SHARED_LIBS "OFF")
+    set(_GGML_STATIC "ON")
 endif()
 set(_WHISPER_CMAKE_ARGS
     "cmake -B build -S ."
     "-DCMAKE_BUILD_TYPE=Release"
     "-DCMAKE_INSTALL_PREFIX=${PREFIX}"
     "-DCMAKE_INSTALL_RPATH=${PREFIX}/lib"
-    "-DBUILD_SHARED_LIBS=ON"
+    "-DBUILD_SHARED_LIBS=${_BUILD_SHARED_LIBS}"
     "-DWHISPER_BUILD_EXAMPLES=OFF"
     "-DWHISPER_BUILD_TESTS=OFF"
     "-DWHISPER_BUILD_SERVER=OFF"
     "-DGGML_CUDA=${_WHISPER_CUDA}"
+    "-DGGML_STATIC=${_GGML_STATIC}"
+    "-DGGML_CUDA_FA_ALL_QUANTS=OFF"
+    "-DGGML_CUDA_GRAPHS=OFF"
     "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
 )
 if(OME_HWACCEL_NVIDIA)
-    list(APPEND _WHISPER_CMAKE_ARGS "\"-DCMAKE_CUDA_ARCHITECTURES=61\;75\;80\;86\;89\"")
-    find_program(_OME_NVCC nvcc HINTS /usr/local/cuda/bin /usr/cuda/bin)
-    if(_OME_NVCC)
-        list(APPEND _WHISPER_CMAKE_ARGS "-DCMAKE_CUDA_COMPILER=${_OME_NVCC}")
-    else()
-        message(WARNING "[OME] nvcc not found - whisper CUDA build may fail. Install CUDA toolkit or add nvcc to PATH.")
+    list(APPEND _WHISPER_CMAKE_ARGS "\"-DCMAKE_CUDA_ARCHITECTURES=61-real\;70-real\;75-real\;80-real\;86-real\;89\"")
+    # nvcc and OME_NVCC_HOST_CXX were resolved by the probe above.
+    list(APPEND _WHISPER_CMAKE_ARGS "-DCMAKE_CUDA_COMPILER=${_OME_NVCC}")
+    if(OME_NVCC_HOST_CXX)
+        list(APPEND _WHISPER_CMAKE_ARGS "-DCMAKE_CUDA_HOST_COMPILER=${OME_NVCC_HOST_CXX}")
     endif()
 endif()
 list(JOIN _WHISPER_CMAKE_ARGS " " _WHISPER_CMAKE_LINE)
@@ -580,19 +704,19 @@ if(ENABLE_X264)
 endif()
 
 if(ENABLE_NVIDIA)
-    list(APPEND _targets nvcc_hdr)
+    list(APPEND _targets ffnvcodec)
 endif()
 
 # Override with single target if requested
 if(DEFINED TARGET)
     if("${TARGET}" STREQUAL "ffmpeg")
         # ffmpeg depends on codec libs; install them first in case they are missing
-        set(_ffmpeg_deps nasm libopus libvpx libwebp libopenh264 fdk_aac)
+        set(_ffmpeg_deps nasm openssl libsrt libopus libvpx libwebp libopenh264 fdk_aac)
         if(ENABLE_X264)
             list(APPEND _ffmpeg_deps libx264)
         endif()
         if(ENABLE_NVIDIA)
-            list(APPEND _ffmpeg_deps nvcc_hdr)
+            list(APPEND _ffmpeg_deps ffnvcodec)
         endif()
         set(_targets ${_ffmpeg_deps} ffmpeg)
     elseif("${TARGET}" STREQUAL "libvpx")

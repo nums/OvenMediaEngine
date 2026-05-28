@@ -131,6 +131,11 @@ namespace pvd
 		std::map<uint32_t, std::shared_ptr<ov::Data>> _h26x_extradata_nalu;
 		std::map<uint32_t, bool> _sent_sequence_header;
 
+		// RID to track ID mapping
+		// Key: "mid:rid" when the SDP a=mid identifier is available (disambiguates across m= sections with reused RIDs),
+		// or just "rid" when no SDP MID is available. Each key is unique, so a single track ID per entry suffices.
+		std::map<ov::String, uint32_t> _simulcast_track_map;
+
 		ov::String _oven_capabilities;
 
 		session_id_t _ice_session_id = 0;

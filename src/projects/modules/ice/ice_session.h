@@ -53,23 +53,20 @@ public:
 	// User data
 	std::any GetUserData() const;
 
-	// TURN client
-	void SetTurnClient(bool is_turn_client);
-	bool IsTurnClient() const;
-
-	// Is data channel enabled
-	void SetDataChannelEnabled(bool is_data_channel_enabled);
-	bool IsDataChannelEnabled() const;
-
-	// Data channel number
-	void SetDataChannelNumber(uint16_t data_channel_number);
-	uint16_t GetDataChannelNumber() const;
-
-	// TURN peer address
-	void SetTurnPeerAddress(const ov::SocketAddress& peer_address);
-	ov::SocketAddress GetTurnPeerAddress() const;
+	// TURN framing is per candidate pair, not per session: a session can hold a
+	// TURN-relayed pair and a direct pair simultaneously and switch the active
+	// pair between them. These find-or-create the pair for address_pair and
+	// record how to send on it (the inner packet is later routed by the same
+	// address_pair, so this is the pair that becomes active for that path).
+	void SetCandidatePairTurnDataChannel(const ov::SocketAddressPair& address_pair, const std::shared_ptr<ov::Socket>& socket, uint16_t channel_number);
+	void SetCandidatePairTurnSendIndication(const ov::SocketAddressPair& address_pair, const std::shared_ptr<ov::Socket>& socket, const ov::SocketAddress& turn_peer_address);
 
 	std::shared_ptr<IceCandidatePair> FindCandidatePair(const ov::SocketAddressPair& address_pair) const;
+
+	// Distinct non-null sockets across all candidate pairs. Used on teardown:
+	// the active pair may be UDP while the session still owns per-connection
+	// TCP sockets (TURN-over-TCP / direct-TCP) from earlier path switches.
+	std::vector<std::shared_ptr<ov::Socket>> GetCandidatePairSockets() const;
 
 	// Candidate pairs
 	void OnReceivedStunBindingRequest(const ov::SocketAddressPair& address_pair, const std::shared_ptr<ov::Socket>& socket);
@@ -77,15 +74,19 @@ public:
 	void OnReceivedStunBindingErrorResponse(const ov::SocketAddressPair& address_pair, const std::shared_ptr<ov::Socket>& socket);
 
 	bool IsConnectable(const ov::SocketAddressPair& address_pair);
-	bool IsConnected(const ov::SocketAddressPair& address_pair);
+	bool IsActive(const ov::SocketAddressPair& address_pair);
 
-	// USE-CANDIDATE, used for controlling role
-	bool UseCandidate(const ov::SocketAddressPair& address_pair);
+	// Mark a STUN-validated pair as nominated/eligible (multiple allowed).
+	bool MarkNominated(const ov::SocketAddressPair& address_pair);
 
-	// Connected candidate pairs
-	std::shared_ptr<IceCandidatePair> GetConnectedCandidatePair() const;
+	// Make a STUN-validated pair the active pair (the one we send on).
+	// False if the pair is unknown or has failed its STUN check.
+	bool SelectActiveCandidatePair(const ov::SocketAddressPair& address_pair);
+
+	// Active candidate pair (the single pair we send on)
+	std::shared_ptr<IceCandidatePair> GetActiveCandidatePair() const;
 	// Socket
-	std::shared_ptr<ov::Socket> GetConnectedSocket() const;
+	std::shared_ptr<ov::Socket> GetActiveSocket() const;
 
 	ov::String ToString() const;
 
@@ -105,25 +106,18 @@ private:
     std::atomic<IceConnectionState> _state{IceConnectionState::New};
 
     // Candidate pairs
-	mutable std::shared_mutex _connected_candidate_pair_mutex;
-    std::shared_ptr<IceCandidatePair> _connected_candidate_pair;
+	mutable std::shared_mutex _active_candidate_pair_mutex;
+    std::shared_ptr<IceCandidatePair> _active_candidate_pair;
 
 	mutable std::shared_mutex _candidate_pairs_mutex;
     std::map<ov::SocketAddressPair, std::shared_ptr<IceCandidatePair>> _candidate_pairs;
 
 	mutable std::shared_mutex _expire_time_mutex;
-	std::chrono::time_point<std::chrono::system_clock> _expire_time;
+	std::chrono::time_point<std::chrono::steady_clock> _expire_time;
 	const int _expire_after_ms;
 	const uint64_t _lifetime_epoch_ms;
 
     // interfaces
     std::any _user_data;
     std::shared_ptr<IcePortObserver> _observer;
-
-	// Connection information with TURN server
-	std::atomic<bool> _is_turn_client = false;
-	std::atomic<bool> _is_data_channel_enabled = false;
-	mutable std::shared_mutex _turn_peer_address_mutex;
-	ov::SocketAddress _turn_peer_address;
-	std::atomic<uint16_t> _data_channel_number = 0;
 };
