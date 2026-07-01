@@ -8,6 +8,7 @@
 //==============================================================================
 #include "llhls_stream.h"
 
+#include <algorithm>
 #include <base/ovlibrary/hex.h>
 #include <base/publisher/application.h>
 #include <base/publisher/stream.h>
@@ -161,6 +162,7 @@ bool LLHlsStream::Start()
 	_storage_config.server_time_based_segment_numbering = llhls_config.IsServerTimeBasedSegmentNumbering();
 
 	_configured_part_hold_back = llhls_config.GetPartHoldBack();
+	_subtitle_hold_back_ms = llhls_config.GetSubtitleHoldBackMs();
 	_preload_hint_enabled = llhls_config.IsPreloadHintEnabled();
 
 	// Find data track
@@ -1763,14 +1765,21 @@ bool LLHlsStream::CheckPlaylistReady()
 	double final_part_hold_back = std::max(min_part_hold_back, _configured_part_hold_back);
 	for (const auto &[track_id, chunklist] : _chunklist_map)
 	{
-		chunklist->SetPartHoldBack(final_part_hold_back);
+		double hold_back = final_part_hold_back;
+		auto track = GetTrack(track_id);
+		if (track != nullptr && track->GetMediaType() == cmn::MediaType::Subtitle && _subtitle_hold_back_ms > 0)
+		{
+			hold_back += (_subtitle_hold_back_ms / 1000.0);
+		}
+		chunklist->SetPartHoldBack(hold_back);
 
 		DumpInitSegmentOfAllItems(chunklist->GetTrack()->GetId());
 	}
 
 	chunklist_lock.unlock();
 
-	logti("LLHlsStream(%s/%s) - Ready to play : Part Hold Back = %f", GetApplication()->GetVHostAppName().CStr(), GetName().CStr(), final_part_hold_back);
+	logti("LLHlsStream(%s/%s) - Ready to play : Part Hold Back = %f (subtitle hold back = %f ms)",
+		  GetApplication()->GetVHostAppName().CStr(), GetName().CStr(), final_part_hold_back, _subtitle_hold_back_ms);
 
 	_playlist_ready = true;
 
@@ -1833,6 +1842,43 @@ void LLHlsStream::OnMediaSegmentCreated(const int32_t &track_id, const uint32_t 
 	}
 
 	logtt("Media segment updated : track_id = %d, segment_number = %d", track_id, segment_number);
+}
+
+void LLHlsStream::ProcessVttChunk(const PendingVttChunk &job)
+{
+	auto vtt_packager = GetVttPackager(job.vtt_track_id);
+	if (vtt_packager == nullptr)
+	{
+		logte("Could not find WebVTT packager for track_id = %d", job.vtt_track_id);
+		return;
+	}
+
+	if (vtt_packager->MakePartialSegment(job.segment_number, job.chunk_number, job.chunk_start_timestamp_ms, job.chunk_duration_ms) == false)
+	{
+		logte("Failed to make partial segment for VTT track_id = %d, segment_number = %d, chunk_number = %d", job.vtt_track_id, job.segment_number, job.chunk_number);
+		return;
+	}
+
+	if (job.last_chunk == true)
+	{
+		if (vtt_packager->MakeSegment(job.segment_number, job.segment_start_timestamp_ms, job.segment_duration_ms) == false)
+		{
+			logte("Failed to make segment for VTT track_id = %d, segment_number = %d", job.vtt_track_id, job.segment_number);
+			return;
+		}
+
+		if (job.segment_has_marker == true)
+		{
+			auto vtt_segment = vtt_packager->GetSegment(job.segment_number);
+			if (vtt_segment != nullptr)
+			{
+				vtt_segment->SetMarkers(job.segment_markers);
+			}
+		}
+	}
+
+	// Update chunklist
+	OnMediaChunkUpdated(job.vtt_track_id, job.segment_number, job.chunk_number, job.last_chunk);
 }
 
 void LLHlsStream::OnMediaChunkUpdated(const int32_t &track_id, const uint32_t &segment_number, const uint32_t &chunk_number, bool last_chunk)
@@ -1910,47 +1956,51 @@ void LLHlsStream::OnMediaChunkUpdated(const int32_t &track_id, const uint32_t &s
 		std::shared_lock<std::shared_mutex> vtt_packagers_lock(_vtt_packagers_lock);
 		auto vtt_packagers = _vtt_packagers; // Copy to avoid deadlock
 		vtt_packagers_lock.unlock();
+
+		auto reference_timestamp_ms = static_cast<int64_t>((static_cast<double>(partial_segment->GetStartTimestamp()) / GetTrack(track_id)->GetTimeBase().GetTimescale()) * 1000.0);
+
 		for (const auto &it : vtt_packagers)
 		{
 			auto vtt_track_id = it.first;
 
-			// Make Subtitle chunk
-			auto vtt_packager = GetVttPackager(vtt_track_id);
-			if (vtt_packager == nullptr)
-			{
-				logte("Could not find WebVTT packager for track_id = %d", vtt_track_id);
-				continue;
-			}
-			
-			auto vtt_chunk_start_timestamp = (static_cast<double>(partial_segment->GetStartTimestamp()) / GetTrack(track_id)->GetTimeBase().GetTimescale()) * 1000.0;
-			if (vtt_packager->MakePartialSegment(segment_number, chunk_number, vtt_chunk_start_timestamp, partial_segment->GetDurationMs()) == false)
-			{
-				logte("Failed to make partial segment for VTT track_id = %d, segment_number = %d, chunk_number = %d", vtt_track_id, segment_number, chunk_number);
-				continue;
-			}
+			PendingVttChunk job;
+			job.vtt_track_id = vtt_track_id;
+			job.segment_number = segment_number;
+			job.chunk_number = chunk_number;
+			job.chunk_start_timestamp_ms = reference_timestamp_ms;
+			job.chunk_duration_ms = partial_segment->GetDurationMs();
+			job.last_chunk = last_chunk;
 
 			if (last_chunk == true)
 			{
-				// Make segment
-				auto vtt_segment_start_timestamp = (static_cast<double>(segment->GetStartTimestamp()) / GetTrack(track_id)->GetTimeBase().GetTimescale()) * 1000.0;
-				if (vtt_packager->MakeSegment(segment_number, vtt_segment_start_timestamp, segment->GetDurationMs()) == false)
-				{
-					logte("Failed to make segment for VTT track_id = %d, segment_number = %d", vtt_track_id, segment_number);
-					continue;
-				}
-
+				job.segment_start_timestamp_ms = static_cast<int64_t>((static_cast<double>(segment->GetStartTimestamp()) / GetTrack(track_id)->GetTimeBase().GetTimescale()) * 1000.0);
+				job.segment_duration_ms = segment->GetDurationMs();
 				if (segment->HasMarker() == true)
 				{
-					auto vtt_segment = vtt_packager->GetSegment(segment_number);
-					if (vtt_segment != nullptr)
-					{
-						vtt_segment->SetMarkers(segment->GetMarkers());
-					}
+					job.segment_has_marker = true;
+					job.segment_markers = segment->GetMarkers();
 				}
 			}
-			
-			// Update chunklist
-			OnMediaChunkUpdated(vtt_track_id, segment_number, chunk_number, last_chunk);
+
+			if (_subtitle_hold_back_ms <= 0)
+			{
+				// No hold-back configured: preserve the previous synchronous behavior exactly.
+				ProcessVttChunk(job);
+			}
+			else
+			{
+				job.dispatch_after_ms = reference_timestamp_ms + static_cast<int64_t>(_subtitle_hold_back_ms);
+				_pending_vtt_chunks.push_back(job);
+			}
+		}
+
+		// Dispatch every pending VTT chunk whose hold-back window has now elapsed, using the
+		// reference track's own timeline as the clock (ticks every chunk, no timer thread needed).
+		while (_pending_vtt_chunks.empty() == false && _pending_vtt_chunks.front().dispatch_after_ms <= reference_timestamp_ms)
+		{
+			auto job = _pending_vtt_chunks.front();
+			_pending_vtt_chunks.pop_front();
+			ProcessVttChunk(job);
 		}
 	}
 
@@ -1974,6 +2024,13 @@ void LLHlsStream::OnMediaSegmentDeleted(const int32_t &track_id, const uint32_t 
 
 	if (IsVttEnabled() && track_id == _vtt_reference_track_id)
 	{
+		// Drop any hold-back-deferred job still targeting this segment - it is being evicted from
+		// the DVR window, so finalizing it later would re-insert an already-removed segment.
+		_pending_vtt_chunks.erase(
+			std::remove_if(_pending_vtt_chunks.begin(), _pending_vtt_chunks.end(),
+						   [segment_number](const PendingVttChunk &job) { return job.segment_number == segment_number; }),
+			_pending_vtt_chunks.end());
+
 		std::shared_lock<std::shared_mutex> vtt_packagers_lock(_vtt_packagers_lock);
 		// If this is a VTT reference track, we need to delete a chunklist for vtt chunklists as well
 		for (const auto &it : _vtt_packagers)
